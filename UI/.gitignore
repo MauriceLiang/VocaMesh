@@ -1,0 +1,5 @@
+# 本地原型缓存与导出文件（不提交）
+node_modules/
+dist/
+*.log
+.DS_Store

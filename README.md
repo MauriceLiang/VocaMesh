@@ -4,4 +4,4 @@
 
 VocaMesh is a product of **Vocafect Effective Vocabulary Technology Limited**.
 
-> Status: Repository initialized. UI/UX design has not started.
+> Status: UI/UX design and the frontend mock are delivered; runtime integration has not started.
