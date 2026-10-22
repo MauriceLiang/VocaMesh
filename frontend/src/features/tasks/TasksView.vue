@@ -10,16 +10,22 @@ import CreateTaskDialog from "./CreateTaskDialog.vue";
 import { useTasksStore } from "@/stores/tasks";
 import { useAgentsStore } from "@/stores/agents";
 import { taskStateMeta } from "@/lib/status";
+import { taskStateFilterOptions, taskTimeFilterOptions } from "@/lib/task-filters";
+import { useAppStore } from "@/stores/app";
+import type { CreateTaskInput } from "@/types";
 
 const router = useRouter();
+const app = useAppStore();
 const tasks = useTasksStore();
 const agents = useAgentsStore();
 const dialogOpen = ref(false);
 
-const stateItems = ["全部", "执行中", "等待审批", "排队中", "已暂停", "需要处理", "已完成", "失败"].map((value) => ({ label: value, value }));
+const stateItems = [...taskStateFilterOptions];
 const workspaceItems = ["全部", "research-2025", "vocab-ops", "release-2.4", "legal-docs"].map((value) => ({ label: value, value }));
 const teamItems = ["全部", "调研团队", "内容团队", "开发者团队"].map((value) => ({ label: value, value }));
-const timeItems = ["最近 7 天", "最近 30 天", "全部时间"].map((value) => ({ label: value, value }));
+const timeItems = [...taskTimeFilterOptions];
+const stateLabel = computed(() => stateItems.find((item) => item.value === tasks.filter.state)?.label ?? "未知状态");
+const timeLabel = computed(() => timeItems.find((item) => item.value === tasks.filter.time)?.label ?? "未知范围");
 
 const rows = computed(() => tasks.visibleTasks);
 
@@ -31,10 +37,23 @@ function openTask(id: string): void {
   void router.push({ name: "task-detail", params: { id } });
 }
 
-async function createFromDialog(payload: { description: string; workspace: string; mode: "single-agent" | "team" | "custom" }): Promise<void> {
+async function createFromDialog(payload: CreateTaskInput): Promise<void> {
   const task = await tasks.create(payload);
   dialogOpen.value = false;
   if (task) await router.push({ name: "task-detail", params: { id: task.id } });
+}
+
+function setStateFilter(value: string): void {
+  if (!tasks.setStateFilter(value)) app.toast("未知的任务状态筛选，当前筛选未更改", "neutral");
+}
+
+function setTimeFilter(value: string): void {
+  if (!tasks.setTimeFilter(value)) app.toast("未知的时间筛选，当前筛选未更改", "neutral");
+}
+
+function formatCreatedAt(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "时间未知" : new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(date);
 }
 </script>
 
@@ -45,8 +64,8 @@ async function createFromDialog(payload: { description: string; workspace: strin
       :subtitle="`${tasks.tasks.length} 个任务 · ${tasks.counters.running} 个执行中 · ${tasks.counters.waiting} 个等待你处理（当前工作在此管理；历史记录用于追溯已结束的 Run）`"
     >
       <template #actions>
-        <VocaDropdown :items="stateItems" @select="(value) => (tasks.filter.state = value)">
-          <VocaButton><SlidersHorizontal :size="12" />筛选：{{ tasks.filter.state }}</VocaButton>
+        <VocaDropdown :items="stateItems" @select="setStateFilter">
+          <VocaButton><SlidersHorizontal :size="12" />筛选：{{ stateLabel }}</VocaButton>
         </VocaDropdown>
         <VocaButton variant="primary" @click="dialogOpen = true">新建任务</VocaButton>
       </template>
@@ -69,8 +88,8 @@ async function createFromDialog(payload: { description: string; workspace: strin
       <VocaDropdown :items="teamItems" @select="(value) => (tasks.filter.team = value)">
         <VocaButton size="sm">执行者：{{ tasks.filter.team }}</VocaButton>
       </VocaDropdown>
-      <VocaDropdown :items="timeItems" @select="(value) => (tasks.filter.time = value)">
-        <VocaButton size="sm">时间：{{ tasks.filter.time }}</VocaButton>
+      <VocaDropdown :items="timeItems" @select="setTimeFilter">
+        <VocaButton size="sm">时间：{{ timeLabel }}</VocaButton>
       </VocaDropdown>
       <span class="v-spacer" />
       <VocaButton variant="ghost" size="sm" @click="tasks.resetFilter()">清除筛选</VocaButton>
@@ -79,7 +98,7 @@ async function createFromDialog(payload: { description: string; workspace: strin
     <div class="v-table-wrap" :style="{ flex: '1 1 auto', overflow: 'auto' }">
       <table class="v-table">
         <thead>
-          <tr><th>状态</th><th>任务</th><th>工作空间</th><th>执行者</th><th>Run</th><th>更新</th><th></th></tr>
+          <tr><th>状态</th><th>任务</th><th>工作空间</th><th>执行者</th><th>Run</th><th>创建</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="task in rows" :key="task.id" class="clickable" @click="openTask(task.id)">
@@ -91,7 +110,7 @@ async function createFromDialog(payload: { description: string; workspace: strin
             <td class="v-mono v-tiny v-secondary">{{ task.workspace }}</td>
             <td class="v-small v-secondary">{{ task.team }}</td>
             <td class="v-mono v-tiny v-muted">{{ task.runId }}</td>
-            <td class="v-small v-muted">{{ task.startedAt }}</td>
+            <td class="v-small v-muted">{{ formatCreatedAt(task.createdAt) }}</td>
             <td><MoreHorizontal :size="14" class="v-muted" /></td>
           </tr>
           <tr v-if="!rows.length">

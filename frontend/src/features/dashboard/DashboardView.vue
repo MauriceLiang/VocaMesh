@@ -8,6 +8,7 @@ import VocaStatus from "@/components/ui/VocaStatus.vue";
 import VocaSegmented from "@/components/ui/VocaSegmented.vue";
 import VocaDropdown from "@/components/ui/VocaDropdown.vue";
 import CreateTaskDialog from "@/features/tasks/CreateTaskDialog.vue";
+import type { CreateTaskInput } from "@/types";
 import { useAppStore } from "@/stores/app";
 import { useApprovalsStore } from "@/stores/approvals";
 import { useTasksStore } from "@/stores/tasks";
@@ -35,13 +36,13 @@ const metrics = computed(() => [
   { key: "running", label: "执行中", value: tasks.counters.running, icon: Loader, filter: "running", tone: "" },
   { key: "waiting", label: "等待你处理", value: tasks.counters.waiting, icon: ShieldCheck, filter: "waiting-approval", tone: "is-blocked" },
   { key: "queued", label: "排队中", value: tasks.counters.queued, icon: Hourglass, filter: "queued", tone: "" },
-  { key: "done", label: "今日已完成", value: 8, icon: Check, filter: "done", tone: "is-success" },
+  { key: "done", label: "已完成", value: tasks.counters.done, icon: Check, filter: "done", tone: "is-success" },
 ]);
 
 const modeHint = computed(() => {
-  if (mode.value === "single-agent") return "使用：研究员 · 不额外启动主管";
-  if (mode.value === "team") return "使用团队：调研团队 · 主管统一协调";
-  return "高级：子任务、依赖与授权手动定义";
+  if (mode.value === "single-agent") return "创建时选择一个可用 Agent，不启动主管";
+  if (mode.value === "team") return "创建时选择一个主管可用的团队";
+  return "计划编辑尚未实现；创建待配置占位任务";
 });
 
 const workspaceItems = computed(() => workspaces.workspaces.map((item) => ({ label: item.name, value: item.name })));
@@ -50,21 +51,8 @@ onMounted(async () => {
   await Promise.all([tasks.load(), approvals.load(), workspaces.load()]);
 });
 
-async function create(): Promise<void> {
-  const text = description.value.trim() || "整理 Q3 竞品资料并生成对比报告";
-  const task = await tasks.create({ description: text, workspace: workspace.value, mode: mode.value });
-  if (task) {
-    description.value = "";
-    await router.push({ name: "task-detail", params: { id: task.id } });
-  }
-}
-
 function submit(): void {
-  if (!description.value.trim()) {
-    dialogOpen.value = true;
-    return;
-  }
-  void create();
+  dialogOpen.value = true;
 }
 
 function openTask(id: string): void {
@@ -76,12 +64,16 @@ async function decide(id: string, decision: "allow-once" | "deny"): Promise<void
   await tasks.load();
 }
 
-async function handleDialogSubmit(payload: { description: string; workspace: string; mode: "single-agent" | "team" | "custom" }): Promise<void> {
+async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
   description.value = payload.description;
   workspace.value = payload.workspace;
   mode.value = payload.mode;
   dialogOpen.value = false;
-  await create();
+  const task = await tasks.create(payload);
+  if (task) {
+    description.value = "";
+    await router.push({ name: "task-detail", params: { id: task.id } });
+  }
 }
 </script>
 
@@ -128,7 +120,7 @@ async function handleDialogSubmit(payload: { description: string; workspace: str
         v-for="metric in metrics"
         :key="metric.key"
         class="v-metric"
-        @pointerup="tasks.filter.state = metric.filter; router.push({ name: 'tasks' })"
+        @pointerup="tasks.setStateFilter(metric.filter); router.push({ name: 'tasks' })"
       >
         <span class="ib" :class="metric.tone"><component :is="metric.icon" :size="14" /></span>
         <span class="flex flex-col items-start gap-[1px]">
@@ -206,7 +198,13 @@ async function handleDialogSubmit(payload: { description: string; workspace: str
       </div>
     </div>
 
-    <CreateTaskDialog v-model="dialogOpen" :default-workspace="workspace" @submit="handleDialogSubmit" />
+    <CreateTaskDialog
+      v-model="dialogOpen"
+      :initial-description="description"
+      :default-workspace="workspace"
+      :default-mode="mode"
+      @submit="handleDialogSubmit"
+    />
   </div>
 </template>
 

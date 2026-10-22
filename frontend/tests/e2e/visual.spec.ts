@@ -7,6 +7,7 @@ import { expect, test } from "@playwright/test";
 const pages: Array<[string, string]> = [
   ["dashboard", "/#/dashboard"],
   ["tasks", "/#/tasks"],
+  ["task-detail", "/#/tasks/t1"],
   ["tools", "/#/tools"],
   ["agents", "/#/agents"],
   ["teams", "/#/teams"],
@@ -26,7 +27,17 @@ for (const theme of ["light", "dark"] as const) {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       expect(overflow).toBeLessThanOrEqual(0);
       await expect(page.locator(".v-content")).toBeVisible();
-      await page.screenshot({ path: `test-results/visual/${theme}-${name}.png` });
+      const { width, height } = page.viewportSize()!;
+      await page.screenshot({ path: `test-results/visual/${width}x${height}/${theme}-${name}.png` });
     });
   }
+
+  test(`visual ${theme} create-task`, async ({ page }) => {
+    await page.goto("/#/dashboard");
+    if (theme === "dark") await page.locator(".v-toolbar").getByRole("button", { name: "切换到暗色" }).click();
+    await page.getByRole("button", { name: "新建任务" }).click();
+    await expect(page.getByRole("combobox", { name: "执行团队" })).toBeVisible();
+    const { width, height } = page.viewportSize()!;
+    await page.screenshot({ path: `test-results/visual/${width}x${height}/${theme}-create-task.png` });
+  });
 }

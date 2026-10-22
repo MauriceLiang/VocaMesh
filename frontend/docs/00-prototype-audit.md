@@ -102,4 +102,4 @@
   pnpm build
   pnpm test:e2e   # 需先 pnpm dev
   ```
-- 2026-10-21 的当前构建与测试状态见 `docs/06-test-report.md`。
+- 本历史审计之后的最新工程构建与测试状态见 `docs/06-test-report.md`，以报告日期为准。

@@ -44,7 +44,7 @@ const instruction = computed(() => props.task.instruction ?? null);
       class="v-msg"
       :class="{ me: message.author === 'user' }"
     >
-      <span v-if="message.author !== 'user'" class="v-avatar-sq">主</span>
+      <span v-if="message.author !== 'user'" class="v-avatar-sq">{{ task.mode === "single-agent" ? "A" : "主" }}</span>
       <div class="bubble">
         <div v-if="message.author !== 'user'">
           <span class="text-[10.5px] font-semibold">{{ message.authorName }}</span>
