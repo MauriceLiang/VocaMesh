@@ -74,12 +74,21 @@ pub struct ExecutionRuntime {
     data_dir: PathBuf,
     active: Arc<Mutex<HashMap<String, mpsc::SyncSender<()>>>>,
     start_gate: Arc<Mutex<()>>,
+    run_timeout: Duration,
 }
 
 impl ExecutionRuntime {
     pub fn open(
         config_dir: impl Into<PathBuf>,
         data_dir: impl Into<PathBuf>,
+    ) -> Result<Self, ServiceError> {
+        Self::open_with_timeout(config_dir, data_dir, RUN_TIMEOUT)
+    }
+
+    fn open_with_timeout(
+        config_dir: impl Into<PathBuf>,
+        data_dir: impl Into<PathBuf>,
+        run_timeout: Duration,
     ) -> Result<Self, ServiceError> {
         let config_dir = config_dir.into();
         let data_dir = data_dir.into();
@@ -94,6 +103,7 @@ impl ExecutionRuntime {
             data_dir,
             active: Arc::new(Mutex::new(HashMap::new())),
             start_gate: Arc::new(Mutex::new(())),
+            run_timeout,
         };
         runtime
             .store
@@ -526,7 +536,7 @@ impl Worker {
                     return Err("run.stop-unconfirmed");
                 }
             }
-            if !timed_out && start.elapsed() >= RUN_TIMEOUT {
+            if !timed_out && start.elapsed() >= self.runtime.run_timeout {
                 timed_out = true;
                 if !terminate_process_tree(child, pid) {
                     return Err("run.stop-unconfirmed");
@@ -878,6 +888,14 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_runtime(root: &std::path::Path) -> ExecutionRuntime {
+        fake_runtime_with_timeout(root, RUN_TIMEOUT)
+    }
+
+    #[cfg(unix)]
+    fn fake_runtime_with_timeout(
+        root: &std::path::Path,
+        run_timeout: Duration,
+    ) -> ExecutionRuntime {
         use std::os::unix::fs::PermissionsExt;
 
         let config = root.join("config");
@@ -904,6 +922,9 @@ case "$*" in
     printf '{"type":"result","result":"failed"}\n'
     exit 7
     ;;
+  *protocol*)
+    printf 'not-json\n'
+    ;;
   *)
     printf '{"type":"result","result":"fake result"}\n'
     ;;
@@ -924,7 +945,7 @@ esac
             .to_string(),
         )
         .unwrap();
-        ExecutionRuntime::open(config, data).unwrap()
+        ExecutionRuntime::open_with_timeout(config, data, run_timeout).unwrap()
     }
 
     #[cfg(unix)]
@@ -1001,6 +1022,53 @@ esac
         assert_eq!(failed.outcome.as_deref(), Some("failed"));
         assert_eq!(failed.exit_code, Some(7));
         assert_eq!(runtime.get_task(&failed.task_id).unwrap().state, "failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_claude_timeout_is_persisted_as_failure() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let runtime = fake_runtime_with_timeout(root.path(), Duration::from_millis(100));
+        let req = runtime_request(
+            "00000000-0000-4000-8000-000000000104",
+            workspace.path(),
+            "slow task",
+        );
+        let (_, run) = runtime.start_read_only_task(req, |_| {}).unwrap();
+
+        let timed_out = wait_for_terminal(&runtime, &run.id);
+
+        assert_eq!(timed_out.outcome.as_deref(), Some("timeout"));
+        assert_eq!(timed_out.error_code.as_deref(), Some("run.timeout"));
+        assert_eq!(
+            runtime.get_task(&timed_out.task_id).unwrap().state,
+            "failed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_claude_invalid_protocol_is_persisted_without_raw_output() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let req = runtime_request(
+            "00000000-0000-4000-8000-000000000105",
+            workspace.path(),
+            "protocol error",
+        );
+        let (_, run) = runtime.start_read_only_task(req, |_| {}).unwrap();
+
+        let failed = wait_for_terminal(&runtime, &run.id);
+        let events = runtime.list_run_events(&run.id, 0, 10).unwrap();
+
+        assert_eq!(failed.outcome.as_deref(), Some("output-protocol-error"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].text,
+            "无法解析 Claude Code 输出事件，原始内容已丢弃"
+        );
     }
 
     #[cfg(unix)]
