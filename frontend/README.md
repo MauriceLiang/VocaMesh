@@ -14,17 +14,17 @@ pnpm dev          # http://localhost:5273
 | 命令 | 作用 |
 |---|---|
 | `pnpm dev` | 开发服务器（hash 路由，直接访问 `/#/dashboard`） |
-| `pnpm build` | `vue-tsc -b` 类型检查 + `vite build` |
+| `pnpm build` | `vue-tsc --noEmit` 类型检查 + `vite build` |
 | `pnpm typecheck` | 仅类型检查 |
-| `pnpm test` | Vitest 单元测试（Service 契约 + 状态语义） |
-| `pnpm test:e2e` | Playwright（需先 `pnpm dev`，或由配置自动启动） |
+| `pnpm test` | Vitest 单元测试（Store / Service 行为 + 状态语义） |
+| `pnpm test:e2e` | Playwright（需安装 Chromium；配置会自动启动开发服务器） |
 
 ## 目录
 
 ```text
 src/
 ├── app/                 # 预留（当前外壳在 components/layout）
-├── router/              # 16 条路由，与原型页面一一对应
+├── router/              # 14 个显式页面路由 + 1 条兜底重定向
 ├── components/
 │   ├── ui/              # VocaButton / VocaInput / VocaSelect / VocaDialog / VocaDropdown / …
 │   └── layout/          # AppShell / AppTitleBar / SidebarNav / TopBar / VocaInspector / CommandPalette
@@ -40,9 +40,9 @@ src/
 └── types/               # 领域类型与 ServiceError
 ```
 
-## 页面（16）
+## 页面（14 个显式路由）
 
-`/welcome` · `/` 工作台 · `/tasks` · `/tasks/:id` 任务详情（含检查器）· `/approvals` · `/history` · `/agents` · `/tools` · `/teams`（关系图/树形）· `/workspaces` · `/settings` · `/notifications` · `/help` · `/states`
+`/welcome` · `/` 工作台 · `/tasks` · `/tasks/:id` 任务详情 · `/approvals` · `/history` · `/agents` · `/tools` · `/teams`（关系图/树形）· `/workspaces` · `/settings` · `/notifications` · `/help` · `/states`。另有 1 条兜底重定向；创建弹窗与检查器属于页面内 UI，不单独计为路由。
 
 ## 关键约束（来自设计规范，勿改）
 
@@ -54,6 +54,6 @@ src/
 
 ## 当前状态
 
-- 页面、组件、Store、Service、Mock 数据、单元/E2E 测试脚本均已落盘。
-- **当前验证**：`pnpm build` 与 `pnpm test` 已通过；Playwright E2E 因本机缺少 Chromium 浏览器尚未完成，见 `docs/06-test-report.md`。
+- 页面、组件、Store、Service 与 Mock 数据已落盘；自定义执行目前只创建待配置占位，不会生成任务依赖。
+- **当前验证**：以 `docs/06-test-report.md` 的本轮实际记录为准。Mock 定时器只模拟前端状态迁移，不表示真实 Agent 已执行。
 - Mock 与真实能力的边界见 `docs/05-handoff.md`。

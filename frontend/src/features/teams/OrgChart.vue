@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { VueFlow, useVueFlow, type Edge, type Node } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
 import { Maximize2, Minus, Plus, RefreshCw } from "lucide-vue-next";
 import AgentNode from "./AgentNode.vue";
 import VocaButton from "@/components/ui/VocaButton.vue";
 import VocaIconButton from "@/components/ui/VocaIconButton.vue";
-import { useTeamsStore } from "@/stores/teams";
+import { NODE_HEIGHT, NODE_WIDTH, useTeamsStore, type GraphPosition } from "@/stores/teams";
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
 
@@ -22,13 +22,24 @@ const emit = defineEmits<{
 const teams = useTeamsStore();
 const { fitView, zoomIn, zoomOut } = useVueFlow({ id: "team-graph" });
 
+const graphHost = ref<HTMLElement | null>(null);
+const graphWidth = ref(0);
+const compactGraph = computed(() => graphWidth.value > 0 && graphWidth.value < 640);
+const compactPositions = ref<Record<string, GraphPosition>>({});
+let graphResizeObserver: ResizeObserver | null = null;
+
 const menu = ref<{ agentId: string; x: number; y: number } | null>(null);
 
 const nodes = computed<Node[]>(() =>
-  teams.members.map((member) => ({
+  teams.members.map((member, index) => ({
     id: member.agentId,
     type: "agent",
-    position: teams.positions[member.agentId] ?? { x: 40, y: 40 },
+    position: compactGraph.value
+      ? compactPositions.value[member.agentId] ?? {
+          x: Math.max(24, (graphWidth.value - NODE_WIDTH) / 2),
+          y: 40 + index * (NODE_HEIGHT + 28),
+        }
+      : teams.positions[member.agentId] ?? { x: 40, y: 40 },
     draggable: true,
     data: {
       agentId: member.agentId,
@@ -62,6 +73,12 @@ const edges = computed<Edge[]>(() =>
 
 function onDragStop(event: { node: Node }): void {
   teams.moveNode(event.node.id, { x: event.node.position.x, y: event.node.position.y });
+  if (compactGraph.value) {
+    compactPositions.value = {
+      ...compactPositions.value,
+      [event.node.id]: { x: event.node.position.x, y: event.node.position.y },
+    };
+  }
 }
 
 function tidy(): void {
@@ -92,10 +109,28 @@ function pick(action: "edit" | "superior" | "make-supervisor" | "remove"): void 
       break;
   }
 }
+
+onMounted(() => {
+  if (!graphHost.value) return;
+  graphResizeObserver = new ResizeObserver(([entry]) => {
+    graphWidth.value = entry.contentRect.width;
+  });
+  graphResizeObserver.observe(graphHost.value);
+});
+
+onBeforeUnmount(() => graphResizeObserver?.disconnect());
+
+watch(compactGraph, async () => {
+  await nextTick();
+  await fitView({ padding: 0.25 });
+});
 </script>
 
 <template>
-  <div class="v-card flex min-h-0 flex-1 flex-col overflow-hidden">
+  <div
+    class="v-card flex min-h-0 flex-1 flex-col overflow-hidden"
+    :style="{ minHeight: compactGraph ? `${Math.max(420, 40 + teams.members.length * (NODE_HEIGHT + 28) + 120)}px` : '320px' }"
+  >
     <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2" :style="{ borderColor: 'var(--border-default)' }">
       <span class="v-tiny v-muted">拖动空白平移 · 滚轮缩放 · 拖动节点调整位置</span>
       <span class="v-spacer" />
@@ -107,7 +142,7 @@ function pick(action: "edit" | "superior" | "make-supervisor" | "remove"): void 
       <VocaButton size="sm" variant="primary" @click="emit('new-agent')"><Plus :size="12" />添加 Agent</VocaButton>
     </div>
 
-    <div class="relative min-h-0 flex-1" @click="closeMenu">
+    <div ref="graphHost" class="relative min-h-0 flex-1" @click="closeMenu">
       <VueFlow
         id="team-graph"
         :nodes="nodes"
