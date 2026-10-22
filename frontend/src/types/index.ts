@@ -26,6 +26,10 @@ export type TaskState =
   | "failed"
   | "unknown";
 
+export type TaskFilterState = "all" | "draft" | "running" | "waiting-approval" | "queued" | "paused" | "needs-attention" | "done" | "failed";
+export type TaskTimeFilter = "7d" | "30d" | "all";
+export type TaskMode = "single-agent" | "team" | "custom";
+
 /** 子任务状态。 */
 export type SubtaskState =
   | "pending"
@@ -162,9 +166,12 @@ export interface Task {
   id: string;
   name: string;
   workspace: string;
+  mode: TaskMode;
   team: string;
   runId: string;
   supervisor: string;
+  /** 机器可读的任务创建时间；不代表最后更新时间或开始时间。 */
+  createdAt: string;
   startedAt: string;
   state: TaskState;
   stateNote: string;
@@ -173,14 +180,16 @@ export interface Task {
   instruction?: TaskInstruction | null;
 }
 
-export interface CreateTaskInput {
+interface CreateTaskBase {
   description: string;
   workspace: string;
-  mode: "single-agent" | "team" | "custom";
-  teamId?: string;
-  agentId?: string;
   attachments?: string[];
 }
+
+export type CreateTaskInput =
+  | (CreateTaskBase & { mode: "single-agent"; agentId: string; teamId?: never })
+  | (CreateTaskBase & { mode: "team"; teamId: string; agentId?: never })
+  | (CreateTaskBase & { mode: "custom"; teamId?: never; agentId?: never });
 
 export interface ApprovalRequest {
   id: string;

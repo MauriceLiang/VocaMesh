@@ -20,7 +20,7 @@ export interface TaskService {
    * 调用时机：S02 输入区提交、S03 弹窗提交。
    * 返回：状态为 queued 的任务（创建 ≠ 开始执行）。
    * 错误：无可用执行者 `task.no-executor`、工作空间不存在 `task.workspace-missing`。
-   * Mock：1.4s 后迁移到 running 并广播状态事件。
+   * Mock：团队/单 Agent 模式在 1.4s 后迁移到 running；自定义占位保持 draft，直到计划编辑能力实现。
    * Rust：入队 + 运行环境检查后再派发；失败要给出可解释原因。
    */
   createTask(input: CreateTaskInput): Promise<Task>;

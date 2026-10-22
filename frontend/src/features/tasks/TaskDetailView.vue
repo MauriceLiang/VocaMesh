@@ -11,7 +11,7 @@ import InspectorPanel from "@/features/inspector/InspectorPanel.vue";
 import { useAppStore } from "@/stores/app";
 import { useApprovalsStore } from "@/stores/approvals";
 import { useTasksStore } from "@/stores/tasks";
-import { taskStateMeta } from "@/lib/status";
+import { taskBannerTone, taskStateMeta } from "@/lib/status";
 
 const route = useRoute();
 const router = useRouter();
@@ -28,6 +28,7 @@ const highlight = ref<string | null>(null);
 
 const taskId = computed(() => String(route.params.id ?? ""));
 const task = computed(() => tasks.tasks.find((item) => item.id === taskId.value) ?? null);
+const isSingleAgent = computed(() => task.value?.mode === "single-agent");
 const meta = computed(() => (task.value ? taskStateMeta(task.value.state) : null));
 const pendingApproval = computed(() => approvals.pending.find((item) => item.taskId === taskId.value) ?? null);
 
@@ -58,11 +59,15 @@ const banner = computed(() => {
     case "stopped":
       return { tone: "is-neutral" as const, text: `已停止：${counts.value.done} 项成果已保留。重试会创建新的 Run，旧记录不变。` };
     case "failed":
+      return { tone: taskBannerTone(current.state), text: `${current.stateNote}。失败节点及其依赖阻塞项需要检查。` };
     case "needs-attention":
+      return { tone: taskBannerTone(current.state), text: `${current.stateNote}。请检查阻塞项并选择后续操作。` };
     case "partial":
-      return { tone: "is-failure" as const, text: `${current.stateNote}。无关子任务已完成，依赖失败节点的子任务已被阻塞。` };
+      return { tone: taskBannerTone(current.state), text: `${current.stateNote}。成果不完整，完成项与跳过项已分组标注。` };
     case "queued":
       return { tone: "is-neutral" as const, text: "排队等待资源：当前并发已满。任务未被丢弃，资源释放后自动开始。" };
+    case "draft":
+      return { tone: "is-neutral" as const, text: "待配置占位：尚未定义执行计划，因此不会进入调度或开始执行。" };
     default:
       return null;
   }
@@ -170,7 +175,7 @@ function exportSummary(): void {
         <span class="inline-flex items-center gap-[5px]"><Folder :size="11" />{{ task.workspace }}</span>
         <span class="inline-flex items-center gap-[5px]"><Users :size="11" />{{ task.team }}</span>
         <span class="inline-flex items-center gap-[5px]"><GitBranch :size="11" />{{ task.runId }}</span>
-        <span class="inline-flex items-center gap-[5px]"><Hourglass :size="11" />开始于 {{ task.startedAt }} · {{ task.stateNote }}</span>
+        <span class="inline-flex items-center gap-[5px]"><Hourglass :size="11" />{{ task.startedAt === "未开始" ? "尚未开始" : `开始于 ${task.startedAt}` }} · {{ task.stateNote }}</span>
       </div>
     </div>
 
@@ -195,25 +200,29 @@ function exportSummary(): void {
     <TaskFlow :subtasks="task.subtasks" :highlight-id="highlight" @open="openSubtask" />
 
     <div class="v-row-between">
-      <span class="v-section-title">主管对话</span>
-      <span class="v-tiny v-muted">原始 Agent 日志在右侧检查器中按需查看</span>
+      <span class="v-section-title">{{ task.mode === "custom" ? "执行计划" : isSingleAgent ? "Agent 对话" : "主管对话" }}</span>
+      <span v-if="task.mode !== 'custom'" class="v-tiny v-muted">原始 Agent 日志在右侧检查器中按需查看</span>
     </div>
-    <TaskChat :task="task" :approval="pendingApproval" @decide="decide" />
+    <div v-if="task.mode === 'custom'" class="v-card v-empty" :style="{ flex: '1 1 auto', minHeight: '200px' }">
+      <span class="text-[13px] font-semibold">执行计划尚未配置</span>
+      <span class="v-small">此任务是待配置占位，不会被调度。配置自定义子任务和依赖后，才能开始执行。</span>
+    </div>
+    <TaskChat v-else :task="task" :approval="pendingApproval" @decide="decide" />
 
-    <div class="v-card" :style="{ position: 'sticky', bottom: 0, zIndex: 3, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '7px', boxShadow: '0 -8px 18px -14px rgb(0 0 0 / 35%)' }">
+    <div v-if="task.mode !== 'custom'" class="v-card" :style="{ position: 'sticky', bottom: 0, zIndex: 3, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '7px', boxShadow: '0 -8px 18px -14px rgb(0 0 0 / 35%)' }">
       <div class="flex items-center gap-2">
         <textarea
           v-model="input"
           rows="1"
           class="min-h-[22px] flex-1 resize-none bg-transparent text-[11.5px] leading-normal outline-none"
-          placeholder="向主管提问，或输入 @ 指定某个 Agent 发送定向指令…"
-          aria-label="向主管发送消息"
+          :placeholder="isSingleAgent ? '向目标 Agent 发送消息，或输入 @ 指定 Agent 发送定向指令…' : '向主管提问，或输入 @ 指定某个 Agent 发送定向指令…'"
+          :aria-label="isSingleAgent ? '向目标 Agent 发送消息' : '向主管发送消息'"
           @keydown.enter.exact.prevent="send"
         />
       </div>
       <div class="flex items-center gap-[10px] v-tiny v-muted">
-        <span>发送给：{{ instructionTarget ? `定向 ${instructionTarget}` : `主管（${task.supervisor}）` }}</span>
-        <span>· 定向指令会同步主管，并显示投递状态</span>
+        <span>发送给：{{ instructionTarget ? `定向 ${instructionTarget}` : isSingleAgent ? task.team.replace(/ · 单 Agent$/, "") : `主管（${task.supervisor}）` }}</span>
+        <span>· 定向指令{{ isSingleAgent ? "按 Mock 演示状态更新" : "会同步主管并显示投递状态" }}</span>
         <span class="v-spacer" />
         <button class="v-tiny" :style="{ border: '1px solid var(--border-default)', borderRadius: '6px', padding: '2px 8px' }" @click="instructionTarget = instructionTarget ? null : '分析师'">
           @ {{ instructionTarget ?? "主管" }}

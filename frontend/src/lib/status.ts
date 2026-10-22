@@ -28,10 +28,14 @@ export const taskStateMeta = (state: TaskState): StatusMeta => {
     case "partial": return { label: "部分完成", tone: "blocked", icon: "alert" };
     case "done": return { label: "已完成", tone: "success", icon: "check" };
     case "failed": return { label: "执行失败", tone: "failure", icon: "x" };
-    case "draft": return { label: "草稿", tone: "neutral", icon: "dot" };
+    case "draft": return { label: "待配置", tone: "neutral", icon: "dot" };
     default: return { label: "状态待确认", tone: "unknown", icon: "help" };
   }
 };
+
+/** 任务提示横幅类名由统一的语义 tone 推导。 */
+export const taskBannerTone = (state: Extract<TaskState, "failed" | "needs-attention" | "partial">): "is-failure" | "is-blocked" =>
+  taskStateMeta(state).tone === "failure" ? "is-failure" : "is-blocked";
 
 export const subtaskStateMeta = (state: SubtaskState): StatusMeta => {
   switch (state) {

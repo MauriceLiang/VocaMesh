@@ -280,17 +280,46 @@ export function createMockServices(): Services {
       return clone(findTask(id));
     },
     async createTask(input: CreateTaskInput) {
-      const isSingle = input.mode === "single-agent";
+      if (!input.description.trim()) throw new ServiceError("请填写任务描述", "task.invalid-input");
+      let executorLabel: string;
+      let supervisorName: string;
+      if (input.mode === "team") {
+        if (input.agentId !== undefined) throw new ServiceError("团队模式不能同时指定单 Agent", "task.invalid-input");
+        const team = input.teamId ? db.teams.find((item) => item.id === input.teamId) : undefined;
+        if (!team) throw new ServiceError("请选择有效团队", "task.no-executor", input.teamId ?? "");
+        const supervisor = db.agents.find((agent) => agent.id === team.supervisorId);
+        if (!supervisor || supervisor.state !== "ready") {
+          throw new ServiceError("所选团队的主管 Agent 当前不可用", "task.no-executor", team.supervisorId);
+        }
+        executorLabel = `${team.name} · ${team.members.length} 人`;
+        supervisorName = supervisor.name;
+      } else if (input.mode === "single-agent") {
+        if (input.teamId !== undefined) throw new ServiceError("单 Agent 模式不能同时指定团队", "task.invalid-input");
+        const agent = input.agentId ? db.agents.find((item) => item.id === input.agentId) : undefined;
+        if (!agent || agent.state !== "ready") {
+          throw new ServiceError("请选择可用的 Agent", "task.no-executor", input.agentId ?? "");
+        }
+        executorLabel = `${agent.name} · 单 Agent`;
+        supervisorName = "无（单 Agent）";
+      } else if (input.mode === "custom") {
+        if (input.teamId !== undefined || input.agentId !== undefined) throw new ServiceError("自定义占位不能绑定团队或 Agent", "task.invalid-input");
+        executorLabel = "自定义执行 · 计划待定义";
+        supervisorName = "未分配";
+      } else {
+        throw new ServiceError("请选择有效的执行模式", "task.invalid-input");
+      }
       const task: Task = {
         id: newId("t"),
-        name: input.description.slice(0, 42),
+        name: input.description.trim().slice(0, 42),
         workspace: input.workspace,
-        team: isSingle ? `${input.agentId ?? "研究员"} · 单 Agent` : input.teamId ? "调研团队 · 4 人" : "自定义执行",
+        mode: input.mode,
+        team: executorLabel,
         runId: db.nextRunId(),
-        supervisor: isSingle ? input.agentId ?? "研究员" : "研究协调员",
-        startedAt: "现在",
-        state: "queued",
-        stateNote: "已创建 · 等待运行环境检查",
+        supervisor: supervisorName,
+        createdAt: new Date().toISOString(),
+        startedAt: "未开始",
+        state: input.mode === "custom" ? "draft" : "queued",
+        stateNote: input.mode === "custom" ? "待配置占位 · 尚未定义执行计划" : "已创建 · 等待运行环境检查",
         subtasks: [],
         messages: input.attachments?.length
           ? [{ id: newId("m"), author: "user", authorName: "你", time: "现在", text: `已附加 ${input.attachments.length} 个文件（模拟）：${input.attachments.join("、")}` }]
@@ -299,14 +328,17 @@ export function createMockServices(): Services {
       };
       db.tasks = [task, ...db.tasks];
       emitTask(task);
-      // 演示：1.4s 后环境检查通过，进入执行中（真实实现由 Rust 派发确认）
-      setTimeout(() => {
-        const current = db.tasks.find((item) => item.id === task.id);
-        if (!current || current.state !== "queued") return;
-        current.state = "running";
-        current.stateNote = "运行环境检查通过 · 已开始执行";
-        emitTask(current);
-      }, 1400);
+      if (input.mode !== "custom") {
+        // 演示：1.4s 后模拟环境检查并进入执行中（真实实现由 Rust 派发确认）
+        setTimeout(() => {
+          const current = db.tasks.find((item) => item.id === task.id);
+          if (!current || current.state !== "queued") return;
+          current.state = "running";
+          current.startedAt = "现在";
+          current.stateNote = "Mock 演示状态：运行环境检查通过 · 已开始执行";
+          emitTask(current);
+        }, 1400);
+      }
       return clone(task);
     },
     async pauseTask(id) {

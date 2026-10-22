@@ -1,7 +1,7 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from "vue-router";
 
 /**
- * 路由表：与原型 16 个页面一一对应。
+ * 14 个显式页面路由；兜底重定向单独统计。弹窗与检查器不是路由。
  * 使用 hash 模式，便于 Tauri 以文件方式加载打包产物。
  */
 const routes: RouteRecordRaw[] = [
