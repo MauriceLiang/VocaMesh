@@ -37,3 +37,47 @@
 - `pnpm --dir frontend tauri dev`：Rust 应用编译并报告启动；未观察到可验收的原生窗口。
 
 尚未运行浏览器 E2E、macOS GUI 视觉验收、Windows 桌面运行和真实 CLI 登录态验证。CI 远端结果需在推送后查看；单测和开发进程启动不代表这些检查通过。
+
+---
+
+# VocaMesh v0.3 单 Agent 执行闭环实施报告
+
+> 状态：**实施中，尚未达到阶段完成门禁。** 代码验证、真实 CLI、GUI、跨平台和 CI 证据分别记录，不相互替代。
+
+## 分支与范围
+
+- 仓库：`MauriceLiang/VocaMesh`；分支：`feature/single-agent-execution-v0.3`。
+- 基线：`origin/main`，`3ef3176061c1260ee70a247a037a5912b7c77544`；v0.2 PR #2 已合并。
+- 工作区含本阶段代码和文档改动；`.github/workflows/ci.yml` 按维护者要求删除。无 `git push --force`。
+- 实施提交：`0bfaddf2707b3906a570acf77738fd2d5ca8907e`；Draft PR：[#3 VocaMesh v0.3 controlled single-agent execution](https://github.com/MauriceLiang/VocaMesh/pull/3)。PR 未合并，等待真实 CLI 与平台验收后再解除 Draft。
+
+## 已实施代码
+
+- 新增 `vocamesh-runtime`：SQLite schema v1、Task/Run/事件记录、幂等 request ID、活跃 Run 唯一约束、事件分页/2 MiB 上限、损坏库保留和 active Run 恢复为 `unknown`。状态未知且不能证明进程结束时，readiness 会阻止新启动。
+- Core 增加 Execution、Task、Run 和 Event DTO；Agent 增加固定 Claude 认证探测、版本门槛、只读参数和 JSONL allowlist/脱敏。
+- Tauri 增加系统目录选择和固定执行/历史 Commands。Unix 任务在过滤快照中运行，并用进程组停止/10 分钟超时；Windows readiness 固定为不可执行。
+- 桌面 Task、Run 与日志接入 Tauri 服务；浏览器保持完整 Mock。新增用户确认和数据发送说明，历史日志按序号补齐/分页。
+- 更新架构、IPC、CLI、安全、开发、路线图和实施报告。CLI 参数核对依据官方文档，尤其 `--restricted` 的文件工具边界和 `--permission-prompts none` 的版本要求。
+
+## 自动化验证
+
+- `cargo fmt --all -- --check`：通过。
+- `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`：通过。
+- `cargo test --workspace --offline --quiet`：通过，35 项测试（Agent 21、Core 2、Runtime 12）。
+- Runtime fake CLI 生命周期测试：成功结果与事件持久化、同请求复用 Run、非零退出映射失败、停止后确认进程组退出。
+- `cargo check --workspace --all-targets --all-features --offline`：通过。
+- `pnpm --dir frontend typecheck`：通过。
+- `pnpm --dir frontend test`：通过，6 个文件、27 项测试。
+- `pnpm --dir frontend build`：通过，Vite 生产构建完成。
+- `git diff --check`：通过。
+- GitHub Actions workflow 已依照维护者要求移除，因此没有 CI workflow/check；不得把本地测试称为 CI 通过。
+
+## 未验证项、限制与风险
+
+- 未运行真实 `claude auth status` 输出到会话，也未触发真实模型任务；没有真实 CLI 手工登录/结果/费用证据。
+- Fake CLI 自动化覆盖成功、非零退出、停止、输出事件持久化与重复请求；没有覆盖 fake timeout、启动失败、协议损坏、进程状态未知、崩溃恢复后的人工解除流程，也没有跨平台进程树测试。
+- 未验收 macOS 原生窗口、目录选择、实时 CLI 日志、停止、重启与文件哈希对比。此前基线报告记录当前机器只有 Command Line Tools，缺完整 Xcode。
+- Windows 真实执行保持禁用，未验证 Job Object/进程树终止；Linux 也未做本机实际运行验收。
+- managed policy hook 仍可能由 Claude Code 应用；快照秘密文件排除和日志凭据规则属于启发式防护，不构成对任意共享目录或所有秘密的完整沙箱。
+- 强制崩溃后残留 Run 进入 `unknown` 并阻止后续真实任务；跨重启安全回收进程组和人工解除状态流程未实现。
+- 由于真实 CLI、GUI、跨平台与生命周期验收尚缺，v0.3 不能标记完成；是否创建 PR 需与阶段门禁一致，PR 不得宣称已通过未完成项。

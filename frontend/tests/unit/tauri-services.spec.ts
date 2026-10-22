@@ -69,4 +69,68 @@ describe("runtime service adapter", () => {
     await Promise.resolve();
     expect(stop).toHaveBeenCalledOnce();
   });
+
+  it("uses SQLite-backed Task and Run IPC in desktop mode and preserves browser Mock", async () => {
+    const services = createServices("tauri");
+    api.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_tasks") return [];
+      if (command === "list_runs") return { items: [], hasMore: false, nextCursor: null };
+      return undefined;
+    });
+
+    expect(await services.tasks.listTasks()).toEqual([]);
+    expect((await services.runs.listRuns()).items).toEqual([]);
+    expect(api.invoke).toHaveBeenCalledWith("list_tasks", undefined);
+    expect(api.invoke).toHaveBeenCalledWith("list_runs", { cursor: undefined, limit: 50 });
+
+    api.invoke.mockClear();
+    const browser = createServices("mock");
+    expect(await browser.tasks.listTasks()).not.toHaveLength(0);
+    expect(api.invoke).not.toHaveBeenCalled();
+  });
+
+  it("passes the confirmed task request to native IPC and replays ordered, deduplicated run events", async () => {
+    const services = createServices("tauri");
+    const input = {
+      requestId: "00000000-0000-4000-8000-000000000001",
+      title: "Read-only check",
+      prompt: "Summarize the folder",
+      providerId: "claude" as const,
+      workspacePath: "/tmp/project",
+      consent: true,
+    };
+    const task = {
+      id: "task_1", title: input.title, prompt: input.prompt, providerId: "claude",
+      workspacePath: input.workspacePath, state: "queued", createdAt: 1, updatedAt: 1,
+      currentRunId: "run_1", authorizationScope: "read-only-filtered-snapshot", consentAt: 1,
+    };
+    const run = {
+      id: "run_1", requestId: input.requestId, taskId: "task_1", providerId: "claude",
+      state: "pending", outcome: null, startedAt: null, finishedAt: null, exitCode: null,
+      summary: null, lastSequence: 2, outputTruncated: false, processId: null, errorCode: null,
+    };
+    api.invoke.mockResolvedValueOnce({ task, run });
+    await expect(services.execution.startReadOnlyTask(input)).resolves.toEqual({ task, run });
+    expect(api.invoke).toHaveBeenCalledWith("start_read_only_task", { request: input });
+
+    const first = { runId: "run_1", sequence: 1, timestamp: 1, kind: "text", text: "A" };
+    const second = { runId: "run_1", sequence: 2, timestamp: 2, kind: "final", text: "AB" };
+    api.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_run") return run;
+      if (command === "list_run_events") return [first, second];
+      return undefined;
+    });
+    let nativeListener!: (event: { payload: typeof second }) => void;
+    api.listen.mockImplementation(async (_name: string, handler: typeof nativeListener) => {
+      nativeListener = handler;
+      return () => undefined;
+    });
+    const lines: number[] = [];
+    services.events.subscribeTaskLogs("run_1", (line) => lines.push(line.sequence!));
+    nativeListener({ payload: second });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lines).toEqual([1, 2]);
+    nativeListener({ payload: { ...second, sequence: 3 } });
+    expect(lines).toEqual([1, 2, 3]);
+  });
 });

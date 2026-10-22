@@ -14,6 +14,7 @@ export const useRunsStore = defineStore("runs", () => {
   const selectedId = ref<string | null>(null);
   const partialGroups = ref<RunArtifactGroup[]>([]);
   const hasMore = ref(false);
+  const nextCursor = ref<string | null>(null);
   const resultFilter = ref("全部");
   const loading = ref(false);
 
@@ -22,20 +23,25 @@ export const useRunsStore = defineStore("runs", () => {
   async function load(): Promise<void> {
     loading.value = true;
     try {
-      const { items, hasMore: more } = await services.runs.listRuns({ result: resultFilter.value });
+      const { items, hasMore: more, nextCursor: cursor } = await services.runs.listRuns({ result: resultFilter.value });
       runs.value = items;
       hasMore.value = more;
-      if (!selectedId.value && items.length) selectedId.value = items[0].id;
-      partialGroups.value = await services.runs.getPartialArtifacts(items[0]?.id ?? "#1244");
+      nextCursor.value = cursor ?? null;
+      if (!selectedId.value || !items.some((item) => item.id === selectedId.value)) selectedId.value = items[0]?.id ?? null;
+      partialGroups.value = items.length ? await services.runs.getPartialArtifacts(selectedId.value ?? items[0].id) : [];
     } finally {
       loading.value = false;
     }
   }
 
   async function loadMore(): Promise<void> {
-    const { items } = await services.runs.listRuns({ result: resultFilter.value });
-    runs.value = items;
-    app.toast("已加载更早的 Run（演示）", "neutral");
+    if (!nextCursor.value) return;
+    const { items, hasMore: more, nextCursor: cursor } = await services.runs.listRuns({ result: resultFilter.value, cursor: nextCursor.value });
+    const known = new Set(runs.value.map((run) => run.id));
+    runs.value = [...runs.value, ...items.filter((run) => !known.has(run.id))];
+    hasMore.value = more;
+    nextCursor.value = cursor ?? null;
+    if (services.mode === "mock") app.toast("已加载更早的 Run（演示）", "neutral");
   }
 
   function select(id: string): void {
@@ -46,7 +52,7 @@ export const useRunsStore = defineStore("runs", () => {
     try {
       const csv = await services.runs.exportRunsCsv({ result: resultFilter.value });
       downloadText("vocamesh-runs.csv", csv, "text/csv;charset=utf-8");
-      app.toast("已生成 vocamesh-runs.csv（演示内容）", "success");
+      app.toast(services.mode === "mock" ? "已生成 vocamesh-runs.csv（演示内容）" : "已导出本机 Run 记录", "success");
     } catch (err) {
       app.toast(err instanceof ServiceError ? err.message : "导出失败", "failure");
     }
@@ -59,7 +65,7 @@ export const useRunsStore = defineStore("runs", () => {
     app.toast("已导出部分成果清单", "success");
   }
 
-  return { runs, selectedId, selected, partialGroups, hasMore, resultFilter, loading, load, loadMore, select, exportCsv, exportPartial };
+  return { runs, selectedId, selected, partialGroups, hasMore, nextCursor, resultFilter, loading, load, loadMore, select, exportCsv, exportPartial };
 });
 
 /** 触发浏览器下载（Mock 阶段唯一的“真实”副作用）。 */

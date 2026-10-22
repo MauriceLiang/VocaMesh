@@ -1,34 +1,36 @@
-# 本机 Agent CLI 发现
+# 本机 Agent CLI 运行时
 
-## Provider 与核实来源
+## 支持范围与版本门槛
 
-| ID | CLI | 固定版本参数 | 认证探测 |
-| --- | --- | --- | --- |
-| `claude` | `claude` / Claude Code | `--version` | 不支持：官方文档没有确认满足本项目安全门槛的只读、非交互状态命令。 |
-| `codex` | `codex` / Codex CLI | `--version` | 不支持：官方资料中出现的状态检查语境不足以确认不会刷新身份凭据或依赖认证文件。 |
-| `opencode` | `opencode` / OpenCode | `--version` | 不支持：官方 `auth list` 会检查存放 provider 凭据的文件，按本项目边界不调用。 |
+只有 Claude Code 接入真实任务。Codex/OpenCode 仍可发现，但不能执行。CLI 必须是绝对路径上的普通可执行文件，运行时会在启动任务前重新核验路径、版本和认证。
 
-官方资料：
+当前安全参数最低版本设为 `2.1.259`：`--restricted` 自 `2.1.248` 起可用，`--permission-prompts none` 自 `2.1.259` 起可用。低版本、认证状态不明或参数校验失败时拒绝启动，不回退到默认权限。2026-10-22 本机记录的 Claude Code 版本为 `2.1.296`；自动化测试不会运行真实模型任务。
 
-- [Tauri 2 + Vite 配置](https://v2.tauri.app/start/frontend/vite/)；[Tauri Core ACL 权限](https://v2.tauri.app/reference/acl/core-permissions/)。
-- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage)：文档列出 `claude --version`；当前设备核实版本为 `2.1.296`。
-- [OpenAI Codex 官方安装器](https://github.com/openai/codex/blob/main/scripts/install/install.sh)：安装器通过 `codex --version` 校验安装；当前设备核实版本为 `codex-cli 0.162.1`。该命令出现一条因沙箱权限无法创建 PATH alias 的警告，退出码为 0。
-- [OpenCode CLI](https://docs.opencode.ai/docs/cli/)：列出全局 `--version` 标志；[Provider 认证说明](https://docs.opencode.ai/docs/providers/)说明凭据文件位置。当前设备未安装 OpenCode。
+## 认证探测
 
-以上版本是 2026-10-22 在本机以固定 `--version` 参数观察到的版本，不是 CI 安装的版本。Tauri 前端 API 和 CLI 包均解析到 `2.12.4`。
+仅运行固定的 `claude auth status` 参数。实现最多在内存中保留 16 KiB stdout，并只解析退出码与 `authMethod`：退出码 0 且方法是 `claude.ai` 或 `oauth_token` 才显示已认证；退出码 1 且方法为 `none` 才显示未认证；API key、helper、third-party、超时、异常退出、无效 JSON 和其他组合都为 `unknown` 并阻止执行。认证 JSON、邮箱、配置目录、令牌、stderr 和完整输出不写入数据库、UI 或日志。
 
-## 路径
+限制 API key/helper/third-party 方法是因为本应用清理了任务子进程环境，不会复制或读取 API Key、云凭据或任意用户环境变量；这些认证方式不能被安全确认可供任务进程使用。
 
-先按当前进程 `PATH` 顺序查找，不启动交互 Shell、不扫描磁盘。macOS 补充 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 和 `~/.bun/bin`。手动路径必须是规范化的绝对普通文件并具有可执行权限；文件消失或变成不可执行时显示 `undetectable`。
+## 固定只读启动参数
 
-Windows 使用当前 `PATH` 与 `PATHEXT` 查找 `.exe`、`.cmd` 等候选。`.cmd` / `.bat` shim 不经 `cmd.exe` 启动，显示无法安全探测；不通过任意脚本启动器绕过边界。CI 在 Windows 上执行 shim 分类单元测试。
+Prompt 作为独立 `-p` 参数，不经 Shell。Runtime 使用固定参数集合：
 
-## 进程与输出
+- `--restricted`：只加载 managed settings 和本次 `--settings`，不读取用户/项目配置，并把内置文件工具限制在工作目录；
+- `--safe-mode`：禁用用户/项目自定义 hooks、MCP、插件、agents、skills、命令、`CLAUDE.md` 等；
+- `--permission-mode plan` 与 `--permission-prompts none`；
+- `--tools Read,Glob,Grep`，以及 `--disallowedTools mcp__*`；
+- `--settings` 写入拒绝已知凭据路径的内联策略；
+- `--no-session-persistence`、`--output-format stream-json`、`--include-partial-messages`、`-p <prompt>`。
 
-每个 CLI 适配器均仅传入固定 `--version` 参数，不用 `sh -c` 或 `bash -c`。stdin 关闭，进程硬超时 3 秒；stdout、stderr 分别最多捕获 8 KiB，超限、非零退出、启动失败、超时、非 UTF-8 或版本解析失败均映射为安全说明。原始输出只暂存在内存用于版本解析，不进入日志、DTO、事件或设置。
+不使用 `--bare`：官方 CLI 文档说明它仍可访问 Bash、文件读取和编辑工具，且跳过认证相关行为。也不使用 `--allowedTools` 作为白名单，因为它只预批准工具而不限制工具可用集合。受限模式负责把内置文件工具限制到工作目录；Runtime 仍将源码复制为过滤快照并在快照目录启动 CLI。
 
-目前尚无官方资料确认三家 CLI 都提供符合“只读、非交互、不刷新凭据、不启动任务”的认证查询，因此认证状态标为 `unsupported` 或 `unknown`；绝不把 CLI 文件或版本存在视作已登录。`verify_tool` 仍可重读版本，但不会尝试认证。
+CLI 来源与参数语义：[CLI reference](https://code.claude.com/docs/en/cli-reference)、[Configure permissions](https://code.claude.com/docs/en/permissions)、[Security](https://code.claude.com/docs/en/security)。这些是官方文档依据，实际模型/账户的手工执行尚未验收。`--safe-mode` 不会禁用 managed policy 中部署的 hooks；组织策略可能仍应用，这是本实现的已知限制。
 
-## 持久化
+## 输出与进程
 
-应用配置目录只保存 `runtime-settings.json`：`schemaVersion`、`manualPaths`、`defaultToolId`。写入用同目录临时文件、同步后原子替换。损坏文件或不支持的 schema 返回 `settings.read-failed`；未知字段拒绝解析。认证结果、令牌、环境变量和命令输出不持久化。进程重启后先重新扫描，之前的默认值在未证实 `ready` 前不会被返回或使用。
+stdout 按最多 64 KiB 的 JSONL 记录解析，只发布 allowlist 的文本增量、最终摘要和固定工具进度消息。未知事件丢弃，协议损坏只生成固定错误文本；stderr 并发读取并丢弃，避免管道阻塞。疑似凭据命中的整条文本会被遮蔽。UTF-8 字节上限为 64 KiB，Run 事件总量最多 2 MiB，超限只持久化一次截断标记后继续消费输出。
+
+任务环境清空后只继承 PATH、用户目录、临时目录、locale、终端标识和 `CLAUDE_CONFIG_DIR`；不打印变量值。stdin 关闭，stdout/stderr 并发读取，硬超时 10 分钟。Unix 进程以独立进程组启动；停止先发 SIGTERM，等待 2 秒后发 SIGKILL，再确认组内进程退出。Windows 执行入口关闭，直到 Job Object 或等效方案完成验证。
+
+正常完成需 exit code 0 和有效 final 事件。非零退出、缺少 final、非法协议、超时、取消和无法确认进程退出映射为失败/停止/未知，不自动重试。历史事件按 `(runId, sequence)` 递增写入 SQLite；进程启动后才进入 `running`。

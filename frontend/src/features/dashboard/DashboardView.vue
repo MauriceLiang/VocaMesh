@@ -204,6 +204,7 @@ async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
       :default-workspace="workspace"
       :default-mode="mode"
       @submit="handleDialogSubmit"
+      @native-created="openTask($event.id)"
     />
   </div>
 </template>

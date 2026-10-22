@@ -8,4 +8,5 @@ export type { WorkspaceService } from "./workspace-service";
 export type { SettingsService } from "./settings-service";
 export type { NotificationService } from "./notification-service";
 export type { EventService } from "./event-service";
+export type { ExecutionService } from "./execution-service";
 export type { Services } from "./services";

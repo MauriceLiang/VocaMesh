@@ -22,6 +22,7 @@ import type {
 import { ServiceError } from "@/types";
 import type {
   AgentService,
+  ExecutionService,
   ApprovalService,
   EventService,
   NotificationService,
@@ -605,7 +606,21 @@ export function createMockServices(): Services {
     },
   };
 
-  return { agents, tools, teams, tasks, approvals, runs, workspaces, settings, notifications, events };
+  const execution: ExecutionService = {
+    async selectWorkspaceDirectory() { return null; },
+    async readiness() { return { ready: false, version: null, authState: "unknown", message: "真实只读执行仅在桌面端提供" }; },
+    async startReadOnlyTask() { throw new ServiceError("真实只读执行仅在桌面端提供", "execution.not-supported"); },
+    async stopRun() { throw new ServiceError("真实只读执行仅在桌面端提供", "execution.not-supported"); },
+    async getRun() { throw new ServiceError("真实只读执行仅在桌面端提供", "execution.not-supported"); },
+    async getTask() { throw new ServiceError("真实只读执行仅在桌面端提供", "execution.not-supported"); },
+    async listTasks() { return []; },
+    async listRuns() { return { items: [], hasMore: false, nextCursor: null }; },
+    async listRunEvents() { return []; },
+    subscribeRunState() { return () => undefined; },
+    subscribeRunEvents() { return () => undefined; },
+  };
+
+  return { agents, tools, teams, tasks, approvals, runs, workspaces, settings, notifications, events, execution };
 }
 
 export type { NotificationItem, ApprovalRequest };

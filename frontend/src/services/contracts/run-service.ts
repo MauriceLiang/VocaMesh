@@ -16,7 +16,7 @@ export interface RunService {
    * 返回：Run 列表 + 是否还有更多。
    * Mock：返回固定 7 条，`loadMore` 追加演示数据。
    */
-  listRuns(filter?: { type?: string; result?: string; time?: string; cursor?: string }): Promise<{ items: RunRecord[]; hasMore: boolean }>;
+  listRuns(filter?: { type?: string; result?: string; time?: string; cursor?: string }): Promise<{ items: RunRecord[]; hasMore: boolean; nextCursor?: string | null }>;
 
   /** 读取 Run 的部分成果分组（完成/跳过/失败）。错误：`run.not-found`。 */
   getPartialArtifacts(runId: string): Promise<RunArtifactGroup[]>;

@@ -14,6 +14,7 @@ export type StatusTone = "success" | "failure" | "blocked" | "neutral" | "unknow
 export type TaskState =
   | "draft"
   | "queued"
+  | "starting"
   | "running"
   | "waiting-approval"
   | "pause-pending"
@@ -50,7 +51,7 @@ export type ToolAuthState = "authenticated" | "unauthenticated" | "unknown" | "u
 export type ToolSource = "path" | "standard-location" | "manual";
 
 /** Run（执行尝试）状态。不可覆盖：重试产生新 Run。 */
-export type RunState = "pending" | "starting" | "running" | "waiting-input" | "stop-requested" | "finished" | "crashed" | "unknown";
+export type RunState = "pending" | "starting" | "running" | "waiting-input" | "stop-requested" | "stopped" | "finished" | "crashed" | "unknown";
 
 /** 审批状态。 */
 export type ApprovalState = "pending" | "allowed-once" | "allowed-task" | "denied" | "revoked" | "expired" | "unknown";
@@ -178,6 +179,9 @@ export interface Task {
   subtasks: Subtask[];
   messages: TaskMessage[];
   instruction?: TaskInstruction | null;
+  /** Present only for native read-only Claude Code tasks. */
+  nativeExecution?: boolean;
+  prompt?: string;
 }
 
 interface CreateTaskBase {
@@ -223,6 +227,68 @@ export interface RunRecord {
   state: RunState;
   startedAt: string;
   duration: string;
+  taskId?: string;
+  providerId?: string;
+  outcome?: string | null;
+  summary?: string | null;
+  outputTruncated?: boolean;
+  finishedAt?: string | null;
+  errorCode?: string | null;
+}
+
+export interface NativeTaskRecord {
+  id: string;
+  title: string;
+  prompt: string;
+  providerId: string;
+  workspacePath: string;
+  state: string;
+  createdAt: number;
+  updatedAt: number;
+  currentRunId: string;
+  authorizationScope: string;
+  consentAt: number;
+}
+
+export interface NativeRunRecord {
+  id: string;
+  requestId: string;
+  taskId: string;
+  providerId: string;
+  state: RunState;
+  outcome: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  exitCode: number | null;
+  summary: string | null;
+  lastSequence: number;
+  outputTruncated: boolean;
+  processId: number | null;
+  errorCode: string | null;
+}
+
+export interface NativeRunEvent {
+  runId: string;
+  sequence: number;
+  timestamp: number;
+  kind: string;
+  text: string;
+}
+
+export interface ExecutionReadiness {
+  ready: boolean;
+  version: string | null;
+  authState: ToolAuthState;
+  message: string;
+}
+
+export interface StartReadOnlyTaskInput {
+  requestId: string;
+  title: string;
+  prompt: string;
+  providerId: "claude";
+  workspacePath: string;
+  consent: boolean;
 }
 
 export interface RunArtifactGroup {
@@ -258,6 +324,8 @@ export interface LogLine {
   level: "INFO" | "WARN" | "ERROR" | "DEBUG";
   actor: string;
   message: string;
+  eventKind?: string;
+  sequence?: number;
 }
 
 export interface ActivityEntry {

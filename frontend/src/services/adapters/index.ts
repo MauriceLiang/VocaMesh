@@ -3,6 +3,7 @@ import type { Services } from "@/services/contracts";
 import { createMockServices } from "@/services/mock/services";
 import { createTauriToolScanEvents } from "@/services/tauri/events";
 import { createTauriToolService } from "@/services/tauri/tools";
+import { createTauriExecutionService, createTauriRunService, createTauriRuntimeEvents, createTauriTaskService } from "@/services/tauri/execution";
 
 export type ServiceMode = "mock" | "tauri";
 
@@ -18,12 +19,16 @@ export function createServices(mode: ServiceMode = (isTauri() ? "tauri" : "mock"
   const mock = createMockServices();
   if (mode === "tauri") {
     const nativeEvents = createTauriToolScanEvents();
+    const execution = createTauriExecutionService();
     return {
       ...mock,
       tools: createTauriToolService(),
-      events: { ...mock.events, subscribeToolScan: nativeEvents.subscribeToolScan },
+      tasks: createTauriTaskService(execution),
+      runs: createTauriRunService(execution),
+      events: createTauriRuntimeEvents(execution, mock.events, nativeEvents.subscribeToolScan),
+      execution,
       mode: "tauri",
-      sourceLabel: "本机工具检测已接入；任务、Agent、团队、审批和运行历史仍为演示数据",
+      sourceLabel: "本机 Claude 只读任务、Run 与日志已接入；Agent、团队、审批等仍为演示数据",
     };
   }
   return { ...mock, mode: "mock", sourceLabel: "Mock 演示数据" };

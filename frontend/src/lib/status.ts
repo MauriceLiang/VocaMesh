@@ -19,6 +19,7 @@ export const taskStateMeta = (state: TaskState): StatusMeta => {
   switch (state) {
     case "running": return { label: "执行中", tone: "neutral", icon: "loader" };
     case "queued": return { label: "排队中", tone: "neutral", icon: "hourglass" };
+    case "starting": return { label: "启动中", tone: "neutral", icon: "loader" };
     case "waiting-approval": return { label: "等待审批", tone: "blocked", icon: "alert" };
     case "pause-pending": return { label: "等待暂停", tone: "neutral", icon: "pause" };
     case "paused": return { label: "已暂停", tone: "neutral", icon: "pause" };
@@ -78,7 +79,8 @@ export const runStateMeta = (state: RunState): StatusMeta => {
     case "running": return { label: "执行中", tone: "neutral", icon: "loader" };
     case "finished": return { label: "已完成", tone: "success", icon: "check" };
     case "crashed": return { label: "异常退出", tone: "failure", icon: "x" };
-    case "stop-requested": return { label: "已停止", tone: "neutral", icon: "square" };
+    case "stop-requested": return { label: "正在停止", tone: "neutral", icon: "square" };
+    case "stopped": return { label: "已停止", tone: "neutral", icon: "square" };
     case "starting": return { label: "启动中", tone: "neutral", icon: "loader" };
     case "waiting-input": return { label: "等待输入", tone: "blocked", icon: "alert" };
     case "pending": return { label: "待启动", tone: "neutral", icon: "dot" };

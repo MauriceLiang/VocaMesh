@@ -8,8 +8,9 @@ withDefaults(
     title: string;
     subtitle?: string;
     width?: number;
+    footerHint?: string;
   }>(),
-  { subtitle: "", width: 760 },
+  { subtitle: "", width: 760, footerHint: "演示环境：不会写入真实系统" },
 );
 
 defineEmits<{ (event: "update:modelValue", value: boolean): void }>();
@@ -35,7 +36,7 @@ defineEmits<{ (event: "update:modelValue", value: boolean): void }>();
           </div>
           <div class="db"><slot /></div>
           <div v-if="$slots.footer" class="df">
-            <span class="v-tiny v-muted">演示环境：不会写入真实系统</span>
+            <span class="v-tiny v-muted">{{ footerHint }}</span>
             <span class="v-spacer" />
             <slot name="footer" />
           </div>

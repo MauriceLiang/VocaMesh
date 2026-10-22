@@ -28,6 +28,9 @@ const logs = ref<LogLine[]>([]);
 const query = ref("");
 const level = ref<"全部" | "警告" | "错误">("全部");
 const autoScroll = ref(true);
+const loadingEarlier = ref(false);
+const earliestSequence = ref<number | null>(null);
+const seenSequences = new Set<number>();
 const bodyRef = ref<HTMLElement | null>(null);
 let unsubscribe: (() => void) | null = null;
 
@@ -45,8 +48,14 @@ const results = ref<Array<{ path: string; state: string; note: string }>>([]);
 
 onMounted(async () => {
   results.value = await services.runs.listArtifacts(props.task.runId);
-  unsubscribe = services.events.subscribeTaskLogs(props.task.id, (line) => {
-    logs.value = [...logs.value, line].slice(-200);
+  unsubscribe = services.events.subscribeTaskLogs(props.task.nativeExecution ? props.task.runId : props.task.id, (line) => {
+    if (line.sequence != null) {
+      if (seenSequences.has(line.sequence)) return;
+      seenSequences.add(line.sequence);
+      earliestSequence.value = earliestSequence.value == null ? line.sequence : Math.min(earliestSequence.value, line.sequence);
+    }
+    logs.value = mergeTextLogs([...logs.value, line]);
+    if (line.eventKind === "final") logs.value = logs.value.filter((item) => item.eventKind !== "text");
     if (autoScroll.value) {
       requestAnimationFrame(() => {
         if (bodyRef.value) bodyRef.value.scrollTop = bodyRef.value.scrollHeight;
@@ -63,6 +72,49 @@ function copyLogs(): void {
     () => app.toast(`已复制 ${filtered.value.length} 行日志`, "success"),
     () => app.toast("当前环境不允许写入剪贴板", "blocked"),
   );
+}
+
+async function loadEarlier(): Promise<void> {
+  if (!props.task.nativeExecution) {
+    app.toast("已加载更早的日志（演示）", "neutral");
+    return;
+  }
+  const firstSequence = earliestSequence.value;
+  if (loadingEarlier.value || firstSequence == null || firstSequence <= 1) return;
+  loadingEarlier.value = true;
+  try {
+    const events = await services.execution.listRunEvents(props.task.runId, Math.max(0, firstSequence - 101), 100);
+    const earlier = events.filter((event) => !seenSequences.has(event.sequence)).map((event) => ({
+      time: new Date(event.timestamp).toLocaleTimeString(),
+      level: event.kind === "protocol-error" ? "ERROR" as const : event.kind === "truncated" ? "WARN" as const : "INFO" as const,
+      actor: "Claude Code",
+      message: event.text,
+      eventKind: event.kind,
+      sequence: event.sequence,
+    }));
+    for (const line of earlier) {
+      if (line.sequence != null) {
+        seenSequences.add(line.sequence);
+        earliestSequence.value = Math.min(earliestSequence.value ?? line.sequence, line.sequence);
+      }
+    }
+    logs.value = mergeTextLogs([...earlier, ...logs.value]);
+  } finally {
+    loadingEarlier.value = false;
+  }
+}
+
+function mergeTextLogs(lines: LogLine[]): LogLine[] {
+  const merged: LogLine[] = [];
+  for (const line of lines) {
+    if (line.eventKind === "text" && merged.at(-1)?.eventKind === "text") {
+      const previous = merged.at(-1)!;
+      merged[merged.length - 1] = { ...line, message: previous.message + line.message };
+    } else {
+      merged.push(line);
+    }
+  }
+  return merged.slice(-500);
 }
 
 const tabs = [
@@ -120,7 +172,7 @@ const tabs = [
             {{ item }}
           </button>
           <span class="v-spacer" />
-          <span class="v-tiny v-muted">{{ filtered.length }} 行 · 演示数据</span>
+          <span class="v-tiny v-muted">{{ filtered.length }} 行 · {{ task.nativeExecution ? "本机运行时" : "演示数据" }}</span>
         </div>
       </div>
       <div class="v-divider" />
@@ -139,10 +191,10 @@ const tabs = [
       </div>
       <div class="v-divider" />
       <div class="flex items-center gap-[10px] px-[14px] py-2">
-        <span class="v-tiny v-muted">显示 {{ filtered.length }} / 231 行</span>
+        <span class="v-tiny v-muted">显示最近 {{ filtered.length }} 行</span>
         <span class="v-spacer" />
         <VocaButton size="sm" variant="ghost" @click="copyLogs"><Copy :size="12" />复制</VocaButton>
-        <VocaButton size="sm" variant="ghost" @click="app.toast('已加载更早的日志（演示）', 'neutral')">加载更早</VocaButton>
+        <VocaButton size="sm" variant="ghost" :disabled="task.nativeExecution ? loadingEarlier || earliestSequence == null || earliestSequence <= 1 : false" :loading="loadingEarlier" @click="loadEarlier">加载更早</VocaButton>
       </div>
     </div>
 
@@ -155,13 +207,13 @@ const tabs = [
         </span>
         <VocaButton size="sm" variant="ghost" @click="app.toast('文件预览：演示环境不读取真实文件', 'neutral')">预览</VocaButton>
       </div>
-      <div class="v-tiny v-muted">路径为模拟路径，不会访问真实文件。</div>
+      <div class="v-tiny v-muted">{{ task.nativeExecution ? "只读阶段不生成文件产物。" : "路径为模拟路径，不会访问真实文件。" }}</div>
     </div>
 
     <div v-else class="flex flex-col gap-2 overflow-auto px-[14px] py-3">
       <div class="flex gap-[10px] text-[11.5px]"><span class="v-muted" :style="{ width: '96px' }">Agent 角色</span><span>{{ subtask?.assignee }}</span></div>
-      <div class="flex gap-[10px] text-[11.5px]"><span class="v-muted" :style="{ width: '96px' }">工作目录</span><span class="v-mono">~/work/{{ task.workspace }}</span></div>
-      <div class="flex gap-[10px] text-[11.5px]"><span class="v-muted" :style="{ width: '96px' }">权限边界</span><span>读: {{ task.workspace }}/ · 写: exports/ · 禁止: ~/.ssh</span></div>
+      <div class="flex gap-[10px] text-[11.5px]"><span class="v-muted" :style="{ width: '96px' }">工作目录</span><span class="v-mono">{{ task.nativeExecution ? task.workspace : `~/work/${task.workspace}` }}</span></div>
+      <div class="flex gap-[10px] text-[11.5px]"><span class="v-muted" :style="{ width: '96px' }">权限边界</span><span>{{ task.nativeExecution ? "只读快照；Shell、写入、MCP 与子 Agent 禁用" : `读: ${task.workspace}/ · 写: exports/ · 禁止: ~/.ssh` }}</span></div>
       <div class="flex gap-[10px] text-[11.5px]"><span class="v-muted" :style="{ width: '96px' }">关联 Run</span><span class="v-mono">{{ task.runId }}</span></div>
       <div class="v-divider" />
       <div class="flex items-center gap-2">
