@@ -49,7 +49,7 @@
 - 仓库：`MauriceLiang/VocaMesh`；分支：`feature/single-agent-execution-v0.3`。
 - 基线：`origin/main`，`3ef3176061c1260ee70a247a037a5912b7c77544`；v0.2 PR #2 已合并。
 - 工作区含本阶段代码和文档改动；`.github/workflows/ci.yml` 按维护者要求删除。无 `git push --force`。
-- 本地自动检查通过；提交与 PR 状态在交付时回填。
+- 实施提交：`0bfaddf2707b3906a570acf77738fd2d5ca8907e`；Draft PR：[#3 VocaMesh v0.3 controlled single-agent execution](https://github.com/MauriceLiang/VocaMesh/pull/3)。PR 未合并，等待真实 CLI 与平台验收后再解除 Draft。
 
 ## 已实施代码
 
