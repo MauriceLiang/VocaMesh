@@ -31,7 +31,7 @@ export interface EventService {
    * 订阅工具扫描进度。
    *
    * 调用时机：S01/S07 扫描期间。
-   * Rust：可上报“正在探测第 N 个适配器”，避免界面用假进度。
+   * Rust：可上报扫描开始/完成/失败；事件不携带 CLI 原始输出。
    */
-  subscribeToolScan(handler: (event: { phase: "scanning" | "done"; message: string }) => void): () => void;
+  subscribeToolScan(handler: (event: { phase: "scanning" | "done" | "failed"; message?: string }) => void): () => void;
 }
