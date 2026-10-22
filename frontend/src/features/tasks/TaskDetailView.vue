@@ -148,7 +148,11 @@ function exportSummary(): void {
         <h1 class="min-w-0 flex-1 text-[18px] font-semibold leading-tight" :style="{ letterSpacing: '-0.3px' }">{{ task.name }}</h1>
         <VocaStatus v-if="meta" :meta="meta" />
         <span class="v-spacer" />
-        <template v-if="['running', 'waiting-approval'].includes(task.state)">
+        <template v-if="task.nativeExecution">
+          <VocaButton v-if="['queued', 'starting', 'running'].includes(task.state)" @click="tasks.stop(task.id)"><Square :size="13" />停止只读任务</VocaButton>
+          <VocaButton v-else-if="task.state === 'stop-pending'" disabled>正在停止；等待进程退出确认…</VocaButton>
+        </template>
+        <template v-else-if="['running', 'waiting-approval'].includes(task.state)">
           <VocaButton @click="tasks.pause(task.id)"><Pause :size="13" />暂停</VocaButton>
           <VocaButton @click="tasks.stop(task.id)"><Square :size="13" />停止</VocaButton>
         </template>
@@ -200,16 +204,23 @@ function exportSummary(): void {
     <TaskFlow :subtasks="task.subtasks" :highlight-id="highlight" @open="openSubtask" />
 
     <div class="v-row-between">
-      <span class="v-section-title">{{ task.mode === "custom" ? "执行计划" : isSingleAgent ? "Agent 对话" : "主管对话" }}</span>
-      <span v-if="task.mode !== 'custom'" class="v-tiny v-muted">原始 Agent 日志在右侧检查器中按需查看</span>
+      <span class="v-section-title">{{ task.nativeExecution ? "只读任务" : task.mode === "custom" ? "执行计划" : isSingleAgent ? "Agent 对话" : "主管对话" }}</span>
+      <span v-if="task.mode !== 'custom' && !task.nativeExecution" class="v-tiny v-muted">原始 Agent 日志在右侧检查器中按需查看</span>
     </div>
-    <div v-if="task.mode === 'custom'" class="v-card v-empty" :style="{ flex: '1 1 auto', minHeight: '200px' }">
+    <div v-if="task.nativeExecution" class="v-card v-panel" :style="{ flex: '1 1 auto', minHeight: '200px' }">
+      <span class="v-small font-medium">本机只读执行</span>
+      <span class="v-tiny v-muted">Provider：Claude Code · 权限：Read、Glob、Grep · Shell、写入、MCP 与子 Agent 不可用。</span>
+      <div class="v-divider" />
+      <span class="v-small whitespace-pre-wrap">{{ task.prompt }}</span>
+      <span class="v-tiny v-muted">运行输出与进度位于右侧“日志”面板。暂停、恢复、重试、追加对话和文件产物本阶段未实现。</span>
+    </div>
+    <div v-else-if="task.mode === 'custom'" class="v-card v-empty" :style="{ flex: '1 1 auto', minHeight: '200px' }">
       <span class="text-[13px] font-semibold">执行计划尚未配置</span>
       <span class="v-small">此任务是待配置占位，不会被调度。配置自定义子任务和依赖后，才能开始执行。</span>
     </div>
     <TaskChat v-else :task="task" :approval="pendingApproval" @decide="decide" />
 
-    <div v-if="task.mode !== 'custom'" class="v-card" :style="{ position: 'sticky', bottom: 0, zIndex: 3, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '7px', boxShadow: '0 -8px 18px -14px rgb(0 0 0 / 35%)' }">
+    <div v-if="task.mode !== 'custom' && !task.nativeExecution" class="v-card" :style="{ position: 'sticky', bottom: 0, zIndex: 3, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '7px', boxShadow: '0 -8px 18px -14px rgb(0 0 0 / 35%)' }">
       <div class="flex items-center gap-2">
         <textarea
           v-model="input"

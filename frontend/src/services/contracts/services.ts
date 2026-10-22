@@ -1,6 +1,7 @@
 import type { AgentService } from "./agent-service";
 import type { ApprovalService } from "./approval-service";
 import type { EventService } from "./event-service";
+import type { ExecutionService } from "./execution-service";
 import type { NotificationService } from "./notification-service";
 import type { RunService } from "./run-service";
 import type { SettingsService } from "./settings-service";
@@ -21,4 +22,5 @@ export interface Services {
   settings: SettingsService;
   notifications: NotificationService;
   events: EventService;
+  execution: ExecutionService;
 }

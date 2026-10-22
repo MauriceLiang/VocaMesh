@@ -124,8 +124,9 @@ function formatCreatedAt(value: string): string {
         </tbody>
       </table>
     </div>
-    <div class="v-tiny v-muted">演示数据：所有任务、Run 与路径均为虚构。点击行进入任务详情；审批入口仍以“待审批”为准，避免双份记录。</div>
+    <div v-if="app.isMock" class="v-tiny v-muted">演示数据：所有任务、Run 与路径均为虚构。点击行进入任务详情；审批入口仍以“待审批”为准，避免双份记录。</div>
+    <div v-else class="v-tiny v-muted">本机任务、Run 和路径来自 VocaMesh 本地运行时；Agent、团队和审批等其他页面仍使用演示数据。</div>
 
-    <CreateTaskDialog v-model="dialogOpen" @submit="createFromDialog" />
+    <CreateTaskDialog v-model="dialogOpen" @submit="createFromDialog" @native-created="openTask($event.id)" />
   </div>
 </template>

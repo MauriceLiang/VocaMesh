@@ -1,6 +1,6 @@
 import { computed, onScopeDispose, ref } from "vue";
 import { defineStore } from "pinia";
-import type { CreateTaskInput, InstructionState, Subtask, Task, TaskFilterState, TaskMessage, TaskTimeFilter } from "@/types";
+import type { CreateTaskInput, InstructionState, StartReadOnlyTaskInput, Subtask, Task, TaskFilterState, TaskMessage, TaskTimeFilter } from "@/types";
 import { ServiceError } from "@/types";
 import { useServices } from "@/services/adapters";
 import { useAppStore } from "./app";
@@ -126,6 +126,20 @@ export const useTasksStore = defineStore("tasks", () => {
     }
   }
 
+  async function createReadOnly(input: StartReadOnlyTaskInput): Promise<Task | null> {
+    try {
+      const created = await services.execution.startReadOnlyTask(input);
+      const task = await services.tasks.getTask(created.task.id);
+      upsertTask(task);
+      selectedId.value = task.id;
+      app.toast("本机只读任务已提交；状态与输出由运行时确认", "success");
+      return task;
+    } catch (err) {
+      app.toast(err instanceof ServiceError ? err.message : "启动只读任务失败", "failure");
+      return null;
+    }
+  }
+
   async function pause(id: string): Promise<void> {
     try {
       const task = await services.tasks.pauseTask(id);
@@ -233,6 +247,7 @@ export const useTasksStore = defineStore("tasks", () => {
     load,
     select,
     create,
+    createReadOnly,
     pause,
     resume,
     stop,

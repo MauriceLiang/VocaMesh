@@ -10,5 +10,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { workspace = true, features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
 vocamesh-agent = { path = "../../crates/vocamesh-agent" }
 vocamesh-core = { path = "../../crates/vocamesh-core" }
+vocamesh-runtime = { path = "../../crates/vocamesh-runtime" }

@@ -1,6 +1,7 @@
 //! Safe local CLI discovery. This crate never starts an agent task or reads credentials.
 
 pub mod discovery;
+pub mod execution;
 pub mod path_resolver;
 pub mod process_probe;
 pub mod settings;
@@ -68,6 +69,19 @@ impl<P: ProcessProbe> AgentRuntime<P> {
                 .map_err(|_| ERR_SETTINGS_WRITE)?;
         }
         Ok(tools)
+    }
+
+    /// Resolve the configured executable using the existing discovery rules.
+    pub fn executable_path(&self, provider: Provider) -> Result<std::path::PathBuf, ServiceError> {
+        let settings = self.settings.load().map_err(|_| ERR_SETTINGS_READ)?;
+        let manual = settings
+            .manual_paths
+            .get(provider.id())
+            .map(std::path::Path::new);
+        match resolve(provider, manual).map_err(|_| ERR_INVALID_PATH)? {
+            Resolution::Found { path, .. } => Ok(path),
+            Resolution::Missing | Resolution::InvalidManual { .. } => Err(ERR_NOT_FOUND),
+        }
     }
 
     pub fn verify_tool(&mut self, id: &str) -> Result<LocalTool, ServiceError> {
