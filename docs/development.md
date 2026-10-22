@@ -41,4 +41,4 @@ cargo check --workspace --all-targets --all-features
 
 ## 真实 CLI 与平台验收
 
-自动化用例覆盖纯解析、过滤快照、SQLite 状态/容量/恢复、Unix fake CLI 成功/非零退出/停止与幂等，以及前端 Mock/Tauri 服务边界。Fake CLI 不访问真实账号或模型。真实登录、模型请求、费用、桌面 GUI/目录选择、停止和文件哈希对比需在开发者明确确认后手工运行；不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。
+自动化用例覆盖纯解析、过滤快照、SQLite 状态/容量/恢复、Unix fake CLI 成功/非零退出/停止/超时/畸形输出协议与幂等，以及前端 Mock/Tauri 服务边界。Fake CLI 不访问真实账号或模型。真实登录、模型请求、费用、桌面 GUI/目录选择、停止和文件哈希对比需在开发者明确确认后手工运行；不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。

@@ -42,42 +42,46 @@
 
 # VocaMesh v0.3 单 Agent 执行闭环实施报告
 
-> 状态：**实施中，尚未达到阶段完成门禁。** 代码验证、真实 CLI、GUI、跨平台和 CI 证据分别记录，不相互替代。
+> 状态：**实现已合并；阶段验收未通过。** PR 合并、自动化测试、真实 CLI、GUI 和平台证据分别记录，不能相互替代。
 
-## 分支与范围
+## 仓库与合并状态
 
-- 仓库：`MauriceLiang/VocaMesh`；分支：`feature/single-agent-execution-v0.3`。
-- 基线：`origin/main`，`3ef3176061c1260ee70a247a037a5912b7c77544`；v0.2 PR #2 已合并。
-- 工作区含本阶段代码和文档改动；`.github/workflows/ci.yml` 按维护者要求删除。无 `git push --force`。
-- 实施提交：`0bfaddf2707b3906a570acf77738fd2d5ca8907e`；Draft PR：[#3 VocaMesh v0.3 controlled single-agent execution](https://github.com/MauriceLiang/VocaMesh/pull/3)。PR 未合并，等待真实 CLI 与平台验收后再解除 Draft。
+- 仓库：`MauriceLiang/VocaMesh`。
+- PR [#3 VocaMesh v0.3 controlled single-agent execution](https://github.com/MauriceLiang/VocaMesh/pull/3) 已合并；合并提交：`e6539a21cd79f49dbe47624d621af97ab77b35bf`。
+- 本轮复核分支：`feature/v0.3-acceptance-evidence`，基于该合并提交，承载 Runtime 测试辅助和验收文档更新。
+- `.github/workflows/ci.yml` 按维护者要求移除；本阶段没有 GitHub Actions 运行结果，也不记录为 CI 通过。
 
-## 已实施代码
+## 本轮实施与自动化验证
 
-- 新增 `vocamesh-runtime`：SQLite schema v1、Task/Run/事件记录、幂等 request ID、活跃 Run 唯一约束、事件分页/2 MiB 上限、损坏库保留和 active Run 恢复为 `unknown`。状态未知且不能证明进程结束时，readiness 会阻止新启动。
-- Core 增加 Execution、Task、Run 和 Event DTO；Agent 增加固定 Claude 认证探测、版本门槛、只读参数和 JSONL allowlist/脱敏。
-- Tauri 增加系统目录选择和固定执行/历史 Commands。Unix 任务在过滤快照中运行，并用进程组停止/10 分钟超时；Windows readiness 固定为不可执行。
-- 桌面 Task、Run 与日志接入 Tauri 服务；浏览器保持完整 Mock。新增用户确认和数据发送说明，历史日志按序号补齐/分页。
-- 更新架构、IPC、CLI、安全、开发、路线图和实施报告。CLI 参数核对依据官方文档，尤其 `--restricted` 的文件工具边界和 `--permission-prompts none` 的版本要求。
-
-## 自动化验证
-
+- `ExecutionRuntime` 保留生产默认 10 分钟超时；新增仅供单元测试使用的私有短超时入口。
+- Fake CLI 补充超时被持久化为失败，以及畸形 JSONL 协议错误只保存固定文本、不保存原始输出的覆盖。
 - `cargo fmt --all -- --check`：通过。
+- `cargo test --workspace --offline --quiet`：通过，37 项测试（Agent 21、Core 2、`Runtime` 14）。
 - `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`：通过。
-- `cargo test --workspace --offline --quiet`：通过，35 项测试（Agent 21、Core 2、Runtime 12）。
-- Runtime fake CLI 生命周期测试：成功结果与事件持久化、同请求复用 Run、非零退出映射失败、停止后确认进程组退出。
 - `cargo check --workspace --all-targets --all-features --offline`：通过。
 - `pnpm --dir frontend typecheck`：通过。
-- `pnpm --dir frontend test`：通过，6 个文件、27 项测试。
-- `pnpm --dir frontend build`：通过，Vite 生产构建完成。
+- `pnpm --dir frontend test`：通过，6 个测试文件、27 项测试。
+- `pnpm --dir frontend build`：通过。
 - `git diff --check`：通过。
-- GitHub Actions workflow 已依照维护者要求移除，因此没有 CI workflow/check；不得把本地测试称为 CI 通过。
 
-## 未验证项、限制与风险
+## 真实 CLI 验收
 
-- 未运行真实 `claude auth status` 输出到会话，也未触发真实模型任务；没有真实 CLI 手工登录/结果/费用证据。
-- Fake CLI 自动化覆盖成功、非零退出、停止、输出事件持久化与重复请求；没有覆盖 fake timeout、启动失败、协议损坏、进程状态未知、崩溃恢复后的人工解除流程，也没有跨平台进程树测试。
-- 未验收 macOS 原生窗口、目录选择、实时 CLI 日志、停止、重启与文件哈希对比。此前基线报告记录当前机器只有 Command Line Tools，缺完整 Xcode。
-- Windows 真实执行保持禁用，未验证 Job Object/进程树终止；Linux 也未做本机实际运行验收。
-- managed policy hook 仍可能由 Claude Code 应用；快照秘密文件排除和日志凭据规则属于启发式防护，不构成对任意共享目录或所有秘密的完整沙箱。
-- 强制崩溃后残留 Run 进入 `unknown` 并阻止后续真实任务；跨重启安全回收进程组和人工解除状态流程未实现。
-- 由于真实 CLI、GUI、跨平台与生命周期验收尚缺，v0.3 不能标记完成；是否创建 PR 需与阶段门禁一致，PR 不得宣称已通过未完成项。
+- 本机 `Claude Code` 版本为 `2.1.296`。`claude auth status` 已通过安全分类器判定为已认证；完整认证输出未展示或持久化。
+- 开发者明确授权后，通过 VocaMesh `Runtime` 在 `/private/tmp` 的隔离临时目录启动了一次真实只读任务。工作区只有一份合成 `README.md`；任务只要求返回其中的合成词组。未读取 VocaMesh 仓库作为任务输入。
+- 任务未通过：Run 终态为 `Crashed`，outcome 为 `failed`，稳定错误码 `execution.cli-failed`，CLI 退出码 1，事件数 0。没有得到可验证的模型结果；是否已联系模型提供方或产生费用无法确认。本轮没有重试。
+- 任务后校验临时输入仍只有原 `README.md`，内容与执行前创建的合成内容一致（`SHA-256`：d3930b8c136fb905434cb7e415c81e4b3828de0d635dd9553c9489d0d9493954）。
+
+## GUI 与平台范围
+
+- `pnpm --dir frontend tauri dev` 曾完成 Vite 监听及桌面 Rust 二进制编译/启动，但桌面窗口清单未发现 VocaMesh；当前机器只有 `Command Line Tools`，缺少完整 Xcode。原生窗口、目录选择及桌面交互未验收。
+- Windows 上 `vocamesh-core` 与 `vocamesh-agent` 的目标检查通过。完整 workspace 的 Windows 检查未通过：在线编译在 Apple clang 编译 bundled SQLite 时缺少 Windows MSVC 标准库/工具链；离线检查也曾因缓存缺少 `webview2-com` 失败。因此这不是 Windows 原生构建通过的证据。Windows 真实执行仍禁用。
+- `Linux target` 未安装，未进行 Linux 编译或运行验收。
+- 未运行 `Playwright E2E`、原生目录选择、真实任务成功/停止/重启恢复等 GUI 手工验收。
+
+## 未完成门禁与已知限制
+
+- 需要另一次明确授权后，再排查真实 CLI 退出码 1 的原因并完成成功结果验收；不能用 Fake CLI 结果替代。
+- macOS 原生 GUI 和目录选择、停止与重启恢复尚未验收；Windows 完整桌面构建/进程树策略与 Linux 本机运行也尚未验收。
+- managed policy 仍可能应用组织部署的 hooks；过滤快照与日志凭据规则是启发式防护，不构成通用文件系统沙箱。
+- 文件系统在快照期间并发变化的竞态，以及崩溃后 `unknown Run` 的进程回收/人工解除流程，仍是待解决限制。
+- 上述真实 CLI 与平台门禁未通过前，v0.3 阶段不能标记完成。
