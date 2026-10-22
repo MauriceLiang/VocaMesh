@@ -15,6 +15,12 @@
 
 尚未通过的阶段门禁：排查并成功验收真实 CLI 任务、macOS 原生窗口/目录选择/停止/重启恢复、Windows 完整桌面构建与进程树行为、Linux 本机编译/运行。完整 Windows 检查受当前 macOS 主机缺少 MSVC 工具链阻塞；`Linux target` 未安装；本机只有 `Command Line Tools`，`Tauri` 开发进程未呈现可验收窗口。没有 GitHub Actions 或 `Playwright E2E` 结果。v0.3 继续标记为未完成，详见 `implementation-report.md`。
 
+### v0.3 验收闭环与 Runtime 加固（本轮）
+
+基于 `b743cb3c9a44dbbb7b162645f086b8e98b699e76` 的 `feature/v0.3-acceptance-closure` 分支，本轮统一 CLI 版本/认证/任务环境，增加有界 stderr 安全分类，修复 unknown Run 的快照保留和 Unix 进程组退出确认，并以目录描述符和 `openat`/`O_NOFOLLOW` 加固快照复制。managed hooks 无法可靠核验时，生产 readiness 与任务入口均 fail-closed；Windows 真实执行仍禁用。
+
+本轮 `./scripts/verify-local.sh` 八项本地门禁全部通过：Rust 52 项测试、前端 7 个文件/28 项测试，以及 fmt、Clippy、Cargo check、typecheck、生产构建和 diff 检查。新增前端用例验证策略 readiness 阻止启动。没有运行真实 CLI 或模型请求；M5 因 managed policy 无法核验标记 BLOCKED。macOS 原生 GUI 因缺少完整 Xcode/可验收桌面环境标记 BLOCKED；Windows、Linux、Playwright E2E 和远端 CI 均未在本轮验收。v0.3 阶段仍未完成，详见 `implementation-report.md`。
+
 ## 后续阶段
 
 - 先补齐受控执行生命周期与平台验收，再考虑可审核写权限、文件变更审批和 Codex/OpenCode Adapter。

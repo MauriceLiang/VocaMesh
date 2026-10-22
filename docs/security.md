@@ -1,30 +1,38 @@
 # 安全边界
 
+## 当前真实执行门禁
+
+桌面端真实执行目前保持 fail-closed。`--restricted` 会加载 Claude Code 的 managed settings 与本次 `--settings`；`--safe-mode` 会关闭常规自定义项，但官方 CLI 文档明确说明 managed policy hooks 仍可运行。Hooks 可执行 Shell 命令。组织策略既可能来自设备文件/MDM，也可能通过 Claude 管理端下发；本机没有受支持的非交互查询可证明这些策略不存在或无副作用。
+
+VocaMesh 不读取完整管理配置、认证文件、令牌、Cookie、钥匙串或凭据正文来绕过这个问题。Unix readiness 返回 `execution.managed-policy-unverified`，任务启动接口也重复执行同一门禁；前端未就绪时禁用开始按钮。自动化 fake CLI 用例通过仅在单元测试中的内部门禁注入运行，不代表生产 readiness 已通过。当前 Runtime 不会为此门禁失败的任务启动 CLI，也不会向模型提供方发送工作区内容。
+
+官方行为依据：[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)、[settings files and precedence](https://code.claude.com/docs/en/settings)、[hooks guide](https://code.claude.com/docs/en/hooks-guide)。
+
 ## 用户确认与数据发送
 
-真实执行前，桌面 UI 展示 Claude Code Provider、用户选择的目录、只读工具、禁止的操作和数据说明。用户必须勾选确认并主动点击“开始只读任务”。Prompt、被读取的文件和输出会由用户本机 Claude Code CLI 发送至其配置的模型提供方。Prompt、结果和规范化目录路径保存在本机应用数据；不要在 Prompt 中放入密码或 Token。
+未来只有当策略、CLI 版本和认证检查全部通过后，桌面 UI 才允许用户确认目录、只读范围与数据发送并启动任务。届时 Prompt、被读取的文件和输出会由本机 Claude Code CLI 发送至用户配置的模型提供方。Prompt、结果和规范化目录路径会保存在本机应用数据；不要在 Prompt 中放入密码或 Token。当前策略门禁未通过时不会创建 Task/Run，也不会传送这些数据。
 
-VocaMesh 不读取、复制、记录或上传 API Key、令牌、Cookie、钥匙串内容、SSH 私钥或认证文件正文。认证探测只解析允许的 `authMethod` 与退出码；任务进程环境采用 allowlist，API key/helper/third-party 认证状态不会被标成可执行。
+认证探测只解析允许的 `authMethod` 与退出码。CLI 版本探测、认证探测和任务执行使用同一份清理后环境，只继承 `PATH`、用户目录、临时目录、locale、终端标识与 `CLAUDE_CONFIG_DIR`；其他变量（包括任意 API key/helper 环境变量）不会传入子进程。
 
-## 只读工作区
+## 只读工作区快照
 
-Runtime 每次都规范化并验证所选目录，拒绝文件系统根、Home 根和已知系统目录；不扫描磁盘。开始前把目录复制到应用数据下的临时快照，跳过符号链接、`.git`、`.ssh`、`.aws`、`.config`、`.claude`、`.codex`、`.opencode`、凭据目录、`.env`、密钥扩展名、常见凭据文件及构建/依赖目录。快照限制 100,000 个文件、512 MiB，任务正常退出后删除。历史路径不构成后续授权。
+Runtime 规范化并验证用户选择的目录，拒绝文件系统根、Home 根、已知系统目录和应用数据目录；不扫描磁盘。Unix/macOS 验证时打开工作区根目录描述符，并在快照复制中一直使用该描述符。目录与文件通过 descriptor-relative `openat`、`O_NOFOLLOW`、`fstatat`/`fstat` 检查；不按已枚举的源路径二次打开。复制前后校验文件/目录元数据，复制期间按实际读取字节执行上限。
 
-Claude 启动使用 `--restricted`、`--safe-mode`、`--permission-mode plan`、`--permission-prompts none` 和仅 `Read,Glob,Grep` 的工具集合，并禁用 MCP 工具。项目/用户自定义 Hook、插件、Agent、Shell、写入工具不加载或不可用。官方 CLI 说明 `--restricted` 限制内置文件工具到工作目录；managed policy 仍可应用，`--safe-mode` 不会关闭组织部署的 managed hooks。VocaMesh 无法阻止组织管理员配置的策略 Hook，此限制已在 UI/实施报告中记录。
+快照会排除 `.git`、`.ssh`、`.aws`、`.config`、`.claude`、`.codex`、`.opencode`、常见凭据目录/文件、密钥扩展名及构建/依赖目录。发现符号链接、特殊文件、路径替换、权限错误、目标快照已存在或其他无法安全处理的情况时，阻止本次快照；不把不完整副本交给 CLI。最多复制 100,000 个普通文件和 512 MiB。只有快照完整后才会创建 pending Run。非 Unix 路径保留保守复制代码，但 Windows 真实执行仍关闭。
 
-文件排除名和输出脱敏是防御性过滤，不保证识别所有秘密。文件系统在复制时发生恶意并发改名/链接替换未做基于目录文件描述符的抗竞态隔离；不可将本阶段视为对不可信共享目录的安全沙箱。
+成功或失败且已确认进程树退出的 Run，在终态数据库写入成功后才清理快照。退出未知或终态写入无法确认时保留快照；清理失败不会改写已经持久化的真实 Run 结果。
 
-## 进程、输出和恢复
+## CLI 参数、输出与进程
 
-- 不使用 Shell 字符串，不允许 Edit/Write/Bash/MCP/子 Agent，不自动重试。
-- stdin 关闭，stderr 只排空并丢弃；stdout 仅解析白名单 JSONL 字段。未知 JSON 和原始工具输入不转发。
-- 可见文本疑似包含已知 Token/Key 格式时遮蔽整条事件；正则/标记不能识别全部秘密。
-- 单条事件最多 64 KiB，每 Run 最多保存 2 MiB；输出到上限后只保存一次截断事件，仍继续排空管道。
-- 并发 Run 上限为 1，硬超时 10 分钟。Unix 进程组停止先 SIGTERM，等待 2 秒后 SIGKILL，只有确认进程组退出才显示停止。
-- 正常关闭请求停止并等待最多 5 秒。重启把残留 active Run 标记为 `unknown`，不重跑；只要仍有无法确认进程退出的记录，readiness 会阻止新任务，直到数据库得到人工恢复。若应用被强制终止，无法证明的子进程不会自动恢复；进程组身份的跨重启回收尚未实现。
-- Windows readiness 固定为不可执行，因为当前没有经验证的 Windows 进程树终止实现。
+- Prompt 作为独立 `-p` 参数传入，不经过 Shell。固定参数限制工具为 `Read,Glob,Grep`，使用 `--permission-mode plan`、`--permission-prompts none`、`--disallowedTools mcp__*` 和凭据路径 deny 规则；不启用写权限、Shell、MCP 工具或子 Agent。
+- `stderr` 最多保留 16 KiB 于内存并继续排空管道。分类器只返回固定的无效参数、认证、配置或一般失败类别；原始 stderr、路径、Token 和认证输出不会写入事件、SQLite、UI 或日志。
+- `stdout` 只解析白名单 JSONL 字段；未知事件与原始工具输入不转发。疑似凭据命中的可见文本会遮蔽整条事件。单条事件最多 64 KiB，每 Run 最多保存 2 MiB，达到上限后仍继续排空。
+- Unix 任务使用独立进程组。停止与超时先发送 `SIGTERM`、等待 2 秒后发送 `SIGKILL`，并确认进程组消失。即使主进程正常退出，也会检查同组后代；遗留后代会被终止，不能确认进程树退出时 Run 进入 `unknown`。
+- `unknown` 保留当前 Run 的 PID/进程组号和快照，并阻止后续新任务。PID 只作为恢复诊断信息；应用重启后不会仅凭 PID 杀进程，也不会自动重跑。当前没有跨重启验证身份或解除 unknown 的恢复 UI。
+- SQLite 迁移/读取失败不会删除数据库。终态写入失败会尽力将 Run 标成 `unknown`；若数据库仍不可写，active 记录继续阻止新任务，快照保持不清理。
+- Windows readiness 固定为不可执行；Linux 未通过本机运行验收。GUI/平台状态见 `implementation-report.md`。
 
-数据库损坏或 schema 版本更新时保留原文件并返回稳定错误，不静默删除或重建。Task/Run 历史、Prompt、摘要和目录路径可能包含敏感内容，均留在本机应用数据目录。
+敏感文件名排除、输出脱敏和只读工具配置是纵深防御，不保证识别所有秘密，也不构成通用操作系统沙箱。用户仍需核对所选目录和数据发送范围。
 
 ## Tauri 权限
 

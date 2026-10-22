@@ -85,3 +85,52 @@
 - managed policy 仍可能应用组织部署的 hooks；过滤快照与日志凭据规则是启发式防护，不构成通用文件系统沙箱。
 - 文件系统在快照期间并发变化的竞态，以及崩溃后 `unknown Run` 的进程回收/人工解除流程，仍是待解决限制。
 - 上述真实 CLI 与平台门禁未通过前，v0.3 阶段不能标记完成。
+
+---
+
+# VocaMesh v0.3 验收闭环与 Runtime 加固报告
+
+> 状态：**M1–M4 本地实现与自动化门禁通过；M5 真实 CLI 验收 BLOCKED；M6 GUI 验收 BLOCKED。v0.3 阶段仍未完成。** Fake CLI、静态检查与构建结果不替代真实 CLI、桌面 GUI 或跨平台验收。
+
+## 基线与环境
+
+- 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.3-acceptance-closure`。
+- 验证时 `HEAD`：`b743cb3c9a44dbbb7b162645f086b8e98b699e76`，与本轮实施分支基线一致。初始存在的无关未跟踪项 `.DS_Store`、`.idea/`、`UI/.write-test` 保持未修改。
+- 系统：macOS 15.6，Apple Silicon arm64；Node `v24.22.1`、pnpm `9.15.9`、Rust `1.98.1`、Cargo `1.98.1`。
+- 已安装 Rust targets：`aarch64-apple-darwin`、`x86_64-pc-windows-msvc`；Linux target 未安装。
+- 当前开发者目录为 `/Library/Developer/CommandLineTools`；`xcodebuild -version` 失败并提示需要完整 Xcode。
+- 本轮未运行 `claude --version`、`claude auth status` 或真实模型任务；报告中的 Claude Code `2.1.296` 和此前真实任务 exit code 1 均为上一轮既有记录，未在本轮重新验证。
+
+## 实施结果
+
+- **M1 — PASS（诊断实现）；原真实 exit code 1 原因仍未查明。** 版本、认证和任务命令共享同一份环境 allowlist。任务 stderr 在内存最多保留 16 KiB 并继续排空；分类器只产生固定错误码，不保存或展示原文。完整固定参数集合有精确测试。
+- **M2 — PASS（自动化生命周期覆盖）。** 正常退出时检查 Unix 进程组，残留后代会被终止；无法确认退出、终态写入失败或结果为 `unknown` 时保留 PID/进程组信息和快照，并由 SQLite 状态阻止后续任务。终态成功写入后清理快照；清理失败不改写已持久化结果。重启后不会自动重跑未知任务。
+- **M3 — PASS（实现与 fake/本地门禁）；生产执行仍受政策阻塞。** Unix/macOS 快照复制从已验证的工作区根目录描述符开始，以 `openat`/`O_NOFOLLOW`、`fstatat`/`fstat` 校验对象，按实际读取限制字节；符号链接、特殊文件、替换竞态和复制错误均阻止任务。managed policy 状态无法可靠核实时，生产 readiness 与任务入口返回 `execution.managed-policy-unverified` 并拒绝启动。Windows 真实执行仍关闭。
+- **M4 — PASS。** Rust lifecycle/diagnostic/snapshot/store 用例、前端 readiness 门禁与本地验证脚本均已补齐。
+- **M5 — BLOCKED，未执行。** 因 managed Claude Code hooks 是否会运行无法通过受支持的非交互方式可靠核实，按照 fail-closed 规则停止真实 CLI 成功验收。本轮未创建模型请求，也没有重试；上一轮 exit code 1 的根因仍未知。
+- **M6 — BLOCKED，未执行 GUI 操作。** 当前只有 Command Line Tools，没有完整 Xcode；本轮未验证原生窗口、目录选择、真实任务交互、桌面停止或重启恢复。Windows、Linux 也未在本轮进行桌面运行验收。
+
+## 本轮本地质量门禁
+
+执行 `./scripts/verify-local.sh`，脚本退出码 `0`，逐项结果如下：
+
+| 命令 | 结果 | 退出码 |
+| --- | --- | ---: |
+| `cargo fmt --all -- --check` | PASS | 0 |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | PASS | 0 |
+| `cargo test --workspace --offline --quiet` | PASS，52 项测试（Agent 25、Core 2、Runtime 25） | 0 |
+| `cargo check --workspace --all-targets --all-features --offline` | PASS | 0 |
+| `pnpm --dir frontend typecheck` | PASS | 0 |
+| `pnpm --dir frontend test` | PASS，7 个文件、28 项测试 | 0 |
+| `pnpm --dir frontend build` | PASS | 0 |
+| `git diff --check` | PASS | 0 |
+
+新增的前端 readiness 定向用例最终通过。测试编写期间首次因 `VocaDialog` 使用 Teleport 而查询了错误的 DOM 容器，修正为挂载并检查 `document.body` 后，定向用例及完整前端套件均通过。Playwright E2E、GitHub Actions/远端 CI、PowerShell 脚本和 Linux/Windows 本机运行均未执行；仓库没有 `.github/workflows`，也未新增 workflow。
+
+## 剩余限制
+
+- 诊断分类器为后续受控诊断提供安全类别，但本轮没有重新启动真实 CLI，因此不能声称已解释此前的 exit code 1。
+- 官方 CLI 的 managed settings/hooks 行为依据见 [CLI reference](https://code.claude.com/docs/en/cli-reference)、[settings files and precedence](https://code.claude.com/docs/en/settings)、[hooks guide](https://code.claude.com/docs/en/hooks-guide)。VocaMesh 当前没有受支持且不读取配置/凭据正文的手段可靠排除 managed hooks，真实执行保持 fail-closed。
+- 当前没有跨重启的进程身份核验和人工解除 `unknown` 的 UI；PID 仅保留为诊断/恢复所需信息，不会单凭旧 PID 终止进程。
+- 非 Unix 快照复制路径仍为保守实现；Windows 真实执行禁用，Linux 无本机验证。文件排除和输出脱敏仍是防御性过滤，不构成通用操作系统沙箱。
+- 本地自动化全部通过，但不能据此标记真实任务、GUI、平台或 CI 验收通过；v0.3 阶段继续未完成。

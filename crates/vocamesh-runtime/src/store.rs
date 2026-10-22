@@ -19,6 +19,7 @@ pub(crate) struct RunFinish<'a> {
     pub(crate) exit_code: Option<i32>,
     pub(crate) summary: Option<&'a str>,
     pub(crate) error_code: Option<&'a str>,
+    pub(crate) pid: Option<u32>,
 }
 
 impl Store {
@@ -91,11 +92,13 @@ impl Store {
     }
 
     pub(crate) fn has_uncertain_process(&self) -> Result<bool, ServiceError> {
-        self.0.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runs WHERE state='unknown' AND error_code IN ('run.stop-unconfirmed','run.recovered-unknown','execution.process-status-unknown'))",
-            [],
-            |row| row.get(0),
-        ).map_err(|_| ERR_READ)
+        self.0
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE state='unknown')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ERR_READ)
     }
 
     pub(crate) fn create_pending(
@@ -109,7 +112,7 @@ impl Store {
             .map_err(|_| ERR_WRITE)?;
         let uncertain: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM runs WHERE state='unknown' AND error_code IN ('run.stop-unconfirmed','run.recovered-unknown','execution.process-status-unknown'))",
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE state='unknown')",
                 [],
                 |row| row.get(0),
             )
@@ -346,7 +349,7 @@ impl Store {
     ) -> Result<RunRecord, ServiceError> {
         let tx = self.0.transaction().map_err(|_| ERR_WRITE)?;
         let timestamp = now();
-        let changed = tx.execute("UPDATE runs SET state=?2,outcome=?3,finished_at=?4,exit_code=?5,summary=?6,error_code=?7,pid=NULL WHERE id=?1 AND state IN ('pending','starting','running','stop-requested')", params![run_id,run_state_as_db(finish.run_state),finish.outcome,timestamp,finish.exit_code,finish.summary,finish.error_code]).map_err(|_| ERR_WRITE)?;
+        let changed = tx.execute("UPDATE runs SET state=?2,outcome=?3,finished_at=?4,exit_code=?5,summary=?6,error_code=?7,pid=CASE WHEN ?2='unknown' THEN COALESCE(pid,?8) ELSE NULL END WHERE id=?1 AND state IN ('pending','starting','running','stop-requested')", params![run_id,run_state_as_db(finish.run_state),finish.outcome,timestamp,finish.exit_code,finish.summary,finish.error_code,finish.pid.map(i64::from)]).map_err(|_| ERR_WRITE)?;
         if changed == 0 {
             tx.commit().map_err(|_| ERR_WRITE)?;
             return self.get_run(run_id);

@@ -15,7 +15,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use vocamesh_agent::execution::{ClaudeCli, ClaudeOutput};
+use vocamesh_agent::execution::{
+    classify_cli_stderr, ClaudeCli, ClaudeOutput, CliFailureKind, ExecutionEnvironment,
+};
 #[cfg(not(windows))]
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
@@ -40,6 +42,10 @@ const ERR_RUNNING: ServiceError =
 const ERR_PROCESS_UNKNOWN: ServiceError = ServiceError::new(
     "execution.process-state-unknown",
     "先前 Claude Code 进程状态无法确认；为避免重复启动，真实执行已暂停",
+);
+const ERR_POLICY_UNVERIFIED: ServiceError = ServiceError::new(
+    "execution.managed-policy-unverified",
+    "无法确认 Claude Code 的组织托管 Hook 是否会产生额外副作用；真实执行已禁用",
 );
 const ERR_DUPLICATE: ServiceError =
     ServiceError::new("execution.request-duplicate", "该请求编号已用于其他任务");
@@ -75,6 +81,14 @@ pub struct ExecutionRuntime {
     active: Arc<Mutex<HashMap<String, mpsc::SyncSender<()>>>>,
     start_gate: Arc<Mutex<()>>,
     run_timeout: Duration,
+    managed_policy: ManagedPolicyStatus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManagedPolicyStatus {
+    Unverified,
+    #[cfg(test)]
+    TestVerifiedSafe,
 }
 
 impl ExecutionRuntime {
@@ -90,6 +104,20 @@ impl ExecutionRuntime {
         data_dir: impl Into<PathBuf>,
         run_timeout: Duration,
     ) -> Result<Self, ServiceError> {
+        Self::open_with_policy(
+            config_dir,
+            data_dir,
+            run_timeout,
+            ManagedPolicyStatus::Unverified,
+        )
+    }
+
+    fn open_with_policy(
+        config_dir: impl Into<PathBuf>,
+        data_dir: impl Into<PathBuf>,
+        run_timeout: Duration,
+        managed_policy: ManagedPolicyStatus,
+    ) -> Result<Self, ServiceError> {
         let config_dir = config_dir.into();
         let data_dir = data_dir.into();
         std::fs::create_dir_all(&data_dir)
@@ -104,6 +132,7 @@ impl ExecutionRuntime {
             active: Arc::new(Mutex::new(HashMap::new())),
             start_gate: Arc::new(Mutex::new(())),
             run_timeout,
+            managed_policy,
         };
         runtime
             .store
@@ -114,12 +143,18 @@ impl ExecutionRuntime {
     }
 
     pub fn readiness(&self) -> ExecutionReadiness {
-        let uncertain = match self.store.lock() {
-            Ok(store) => store.has_uncertain_process().unwrap_or(true),
-            Err(_) => true,
+        let (uncertain, active) = match self.store.lock() {
+            Ok(store) => (
+                store.has_uncertain_process().unwrap_or(true),
+                store.has_active().unwrap_or(true),
+            ),
+            Err(_) => (true, true),
         };
         if uncertain {
             return not_ready("先前进程状态无法确认；为避免重复启动，真实执行已暂停");
+        }
+        if active {
+            return not_ready("本机 Run 尚未完成状态核对；真实执行已暂停");
         }
         #[cfg(windows)]
         {
@@ -132,11 +167,15 @@ impl ExecutionRuntime {
         }
         #[cfg(not(windows))]
         {
+            if self.managed_policy == ManagedPolicyStatus::Unverified {
+                return not_ready(ERR_POLICY_UNVERIFIED.message);
+            }
             let tools = AgentRuntime::new(self.config_dir.clone());
             let Ok(path) = tools.executable_path(Provider::Claude) else {
                 return not_ready("未找到 Claude Code CLI");
             };
-            let Ok(cli) = ClaudeCli::verify(&path) else {
+            let environment = ExecutionEnvironment::current();
+            let Ok(cli) = ClaudeCli::verify_with_environment(&path, environment) else {
                 return not_ready("Claude Code CLI 版本或安全参数不兼容");
             };
             let auth_state = cli.authentication_state();
@@ -205,10 +244,15 @@ impl ExecutionRuntime {
                 return Err(ERR_PROCESS_UNKNOWN);
             }
         }
+        if self.managed_policy == ManagedPolicyStatus::Unverified {
+            return Err(ERR_POLICY_UNVERIFIED);
+        }
+        let environment = ExecutionEnvironment::current();
         let executable = AgentRuntime::new(self.config_dir.clone())
             .executable_path(Provider::Claude)
             .map_err(|_| ERR_CLI)?;
-        let cli = ClaudeCli::verify(&executable).map_err(|_| ERR_CLI)?;
+        let cli = ClaudeCli::verify_with_environment(&executable, environment.clone())
+            .map_err(|_| ERR_CLI)?;
         let auth = cli.authentication_state();
         if auth == AuthenticationState::Unauthenticated {
             return Err(ERR_AUTH);
@@ -226,7 +270,7 @@ impl ExecutionRuntime {
             .store
             .lock()
             .map_err(|_| storage_write())?
-            .create_pending(&request, &workspace.to_string_lossy())
+            .create_pending(&request, &workspace.path.to_string_lossy())
         {
             Ok(records) => records,
             Err(error) => {
@@ -245,6 +289,7 @@ impl ExecutionRuntime {
             run_id: run.id.clone(),
             prompt: request.prompt,
             executable,
+            environment,
             snapshot_path,
             stop_rx,
             notify: Arc::new(notify),
@@ -255,7 +300,6 @@ impl ExecutionRuntime {
             .is_err()
         {
             self.active.lock().map_err(|_| ERR_RUNNING)?.remove(&run.id);
-            let _ = std::fs::remove_dir_all(cleanup_path);
             let mut store = self.store.lock().map_err(|_| storage_write())?;
             let finished = store.finish(
                 &run.id,
@@ -266,8 +310,12 @@ impl ExecutionRuntime {
                     exit_code: None,
                     summary: None,
                     error_code: Some("execution.spawn-failed"),
+                    pid: None,
                 },
             )?;
+            if finished.state != RunState::Unknown {
+                let _ = std::fs::remove_dir_all(cleanup_path);
+            }
             return Ok((task, finished));
         }
         Ok((task, run))
@@ -314,6 +362,7 @@ impl ExecutionRuntime {
                 exit_code: None,
                 summary: None,
                 error_code: Some("run.stop-unconfirmed"),
+                pid: current.process_id,
             },
         )?;
         notify(RuntimeNotification::State(unknown));
@@ -343,6 +392,7 @@ impl ExecutionRuntime {
         }
         if let Ok(mut store) = self.store.lock() {
             for run_id in run_ids {
+                let pid = store.get_run(&run_id).ok().and_then(|run| run.process_id);
                 let _ = store.finish(
                     &run_id,
                     RunFinish {
@@ -352,6 +402,7 @@ impl ExecutionRuntime {
                         exit_code: None,
                         summary: None,
                         error_code: Some("run.stop-unconfirmed"),
+                        pid,
                     },
                 );
             }
@@ -398,77 +449,177 @@ struct Worker {
     run_id: String,
     prompt: String,
     executable: PathBuf,
+    environment: ExecutionEnvironment,
     snapshot_path: PathBuf,
     stop_rx: mpsc::Receiver<()>,
     notify: Arc<dyn Fn(RuntimeNotification) + Send + Sync>,
 }
 
+enum ProcessCompletion {
+    ExitedSuccessfully {
+        exit_code: Option<i32>,
+        summary: String,
+    },
+    ExitedWithFailure {
+        outcome: &'static str,
+        exit_code: Option<i32>,
+        summary: Option<String>,
+        error_code: &'static str,
+    },
+    StoppedAndExited {
+        exit_code: Option<i32>,
+    },
+    TimedOutAndExited {
+        exit_code: Option<i32>,
+    },
+    ExitUnconfirmed {
+        error_code: &'static str,
+        pid: Option<u32>,
+    },
+}
+
 impl Worker {
     fn execute(self) {
-        let result = self.run_process();
-        self.runtime
-            .active
-            .lock()
-            .ok()
-            .map(|mut active| active.remove(&self.run_id));
-        let _ = std::fs::remove_dir_all(&self.snapshot_path);
-        if let Err(outcome) = result {
-            if let Ok(mut store) = self.runtime.store.lock() {
-                let unresolved = matches!(
+        let completion = self.run_process();
+        self.finalize(completion);
+    }
+
+    fn finalize(&self, completion: ProcessCompletion) {
+        let completion_pid = match &completion {
+            ProcessCompletion::ExitUnconfirmed { pid, .. } => *pid,
+            _ => None,
+        };
+        let (run_state, outcome, task_state, exit_code, summary, error_code, uncertain) =
+            match &completion {
+                ProcessCompletion::ExitedSuccessfully { exit_code, summary } => (
+                    RunState::Finished,
+                    "success",
+                    "done",
+                    *exit_code,
+                    Some(summary.as_str()),
+                    None,
+                    false,
+                ),
+                ProcessCompletion::ExitedWithFailure {
                     outcome,
-                    "run.stop-unconfirmed" | "execution.process-status-unknown"
-                );
-                let (state, task_state) = if unresolved {
-                    (RunState::Unknown, "unknown")
-                } else {
-                    (RunState::Crashed, "failed")
-                };
-                if let Ok(run) = store.finish(
-                    &self.run_id,
-                    RunFinish {
-                        run_state: state,
-                        outcome,
-                        task_state,
-                        exit_code: None,
-                        summary: None,
-                        error_code: Some(outcome),
-                    },
-                ) {
-                    (self.notify)(RuntimeNotification::State(run));
-                }
+                    exit_code,
+                    summary,
+                    error_code,
+                } => (
+                    RunState::Crashed,
+                    *outcome,
+                    "failed",
+                    *exit_code,
+                    summary.as_deref(),
+                    Some(*error_code),
+                    false,
+                ),
+                ProcessCompletion::StoppedAndExited { exit_code } => (
+                    RunState::Finished,
+                    "stopped",
+                    "stopped",
+                    *exit_code,
+                    None,
+                    None,
+                    false,
+                ),
+                ProcessCompletion::TimedOutAndExited { exit_code } => (
+                    RunState::Finished,
+                    "timeout",
+                    "failed",
+                    *exit_code,
+                    None,
+                    Some("run.timeout"),
+                    false,
+                ),
+                ProcessCompletion::ExitUnconfirmed { error_code, .. } => (
+                    RunState::Unknown,
+                    "unknown",
+                    "unknown",
+                    None,
+                    None,
+                    Some(*error_code),
+                    true,
+                ),
+            };
+
+        let persisted = self.runtime.store.lock().ok().and_then(|mut store| {
+            match store.finish(
+                &self.run_id,
+                RunFinish {
+                    run_state,
+                    outcome,
+                    task_state,
+                    exit_code,
+                    summary,
+                    error_code,
+                    pid: completion_pid,
+                },
+            ) {
+                Ok(run) => Some(run),
+                Err(_) => store
+                    .finish(
+                        &self.run_id,
+                        RunFinish {
+                            run_state: RunState::Unknown,
+                            outcome: "unknown",
+                            task_state: "unknown",
+                            exit_code: None,
+                            summary: None,
+                            error_code: Some("storage.write-failed"),
+                            pid: completion_pid,
+                        },
+                    )
+                    .ok(),
             }
+        });
+
+        let can_cleanup = !uncertain
+            && persisted
+                .as_ref()
+                .is_some_and(|run| run.state != RunState::Unknown);
+        if let Some(run) = persisted {
+            (self.notify)(RuntimeNotification::State(run));
+        }
+        if can_cleanup {
+            let _ = std::fs::remove_dir_all(&self.snapshot_path);
+        }
+        if let Ok(mut active) = self.runtime.active.lock() {
+            active.remove(&self.run_id);
         }
     }
 
-    fn run_process(&self) -> Result<(), &'static str> {
+    fn run_process(&self) -> ProcessCompletion {
         if self.stop_rx.try_recv().is_ok() {
-            return self.finish_stopped();
+            return ProcessCompletion::StoppedAndExited { exit_code: None };
         }
-        let cli = ClaudeCli::verify(&self.executable).map_err(|_| "execution.cli-not-ready")?;
+        let cli =
+            match ClaudeCli::verify_with_environment(&self.executable, self.environment.clone()) {
+                Ok(cli) => cli,
+                Err(_) => return failure("execution.cli-not-ready"),
+            };
         if cli.authentication_state() != AuthenticationState::Authenticated {
-            return Err("execution.auth-required");
+            return failure("execution.auth-required");
         }
-        let starting = self
-            .runtime
-            .store
-            .lock()
-            .map_err(|_| "storage.write-failed")?
-            .set_state(&self.run_id, RunState::Starting, "starting", None)
-            .map_err(|_| "storage.write-failed")?;
+        let starting = match self.runtime.store.lock() {
+            Ok(mut store) => {
+                match store.set_state(&self.run_id, RunState::Starting, "starting", None) {
+                    Ok(run) => run,
+                    Err(_) => return failure("storage.write-failed"),
+                }
+            }
+            Err(_) => return failure("storage.write-failed"),
+        };
         (self.notify)(RuntimeNotification::State(starting));
         if self.stop_rx.try_recv().is_ok() {
-            self.finish_stopped()?;
-            return Ok(());
+            return ProcessCompletion::StoppedAndExited { exit_code: None };
         }
-        if self
-            .runtime
-            .get_run(&self.run_id)
-            .map_err(|_| "storage.read-failed")?
-            .state
-            == RunState::StopRequested
-        {
-            self.finish_stopped()?;
-            return Ok(());
+        match self.runtime.get_run(&self.run_id) {
+            Ok(run) if run.state == RunState::StopRequested => {
+                return ProcessCompletion::StoppedAndExited { exit_code: None };
+            }
+            Err(_) => return failure("storage.read-failed"),
+            _ => {}
         }
         let mut command = Command::new(&self.executable);
         command
@@ -476,53 +627,69 @@ impl Worker {
             .current_dir(&self.snapshot_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear();
-        inherit_safe_environment(&mut command);
+            .stderr(Stdio::piped());
+        cli.configure_command(&mut command);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().map_err(|_| "execution.spawn-failed")?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => return failure("execution.spawn-failed"),
+        };
         let pid = child.id();
-        match self.monitor_process(&mut child, pid) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                if terminate_process_tree(&mut child, pid) {
-                    Err(error)
-                } else {
-                    Err("run.stop-unconfirmed")
-                }
-            }
-        }
+        self.monitor_process(&mut child, pid)
     }
 
-    fn monitor_process(&self, child: &mut Child, pid: u32) -> Result<(), &'static str> {
-        let running = self
-            .runtime
-            .store
-            .lock()
-            .map_err(|_| "storage.write-failed")?
-            .set_state(&self.run_id, RunState::Running, "running", Some(pid))
-            .map_err(|_| "storage.write-failed")?;
+    fn monitor_process(&self, child: &mut Child, pid: u32) -> ProcessCompletion {
+        let running = match self.runtime.store.lock() {
+            Ok(mut store) => {
+                match store.set_state(&self.run_id, RunState::Running, "running", Some(pid)) {
+                    Ok(run) => run,
+                    Err(_) => {
+                        return if terminate_process_tree(child, pid) {
+                            failure("storage.write-failed")
+                        } else {
+                            ProcessCompletion::ExitUnconfirmed {
+                                error_code: "run.stop-unconfirmed",
+                                pid: Some(pid),
+                            }
+                        };
+                    }
+                }
+            }
+            Err(_) => {
+                return if terminate_process_tree(child, pid) {
+                    failure("storage.write-failed")
+                } else {
+                    ProcessCompletion::ExitUnconfirmed {
+                        error_code: "run.stop-unconfirmed",
+                        pid: Some(pid),
+                    }
+                };
+            }
+        };
         (self.notify)(RuntimeNotification::State(running));
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("execution.output-protocol-error")?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("execution.output-protocol-error")?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            return if terminate_process_tree(child, pid) {
+                failure("execution.output-protocol-error")
+            } else {
+                ProcessCompletion::ExitUnconfirmed {
+                    error_code: "run.stop-unconfirmed",
+                    pid: Some(pid),
+                }
+            };
+        };
         let (output_tx, output_rx) = mpsc::sync_channel::<ClaudeOutput>(128);
         let stdout_tx = output_tx.clone();
         thread::spawn(move || read_stream(stdout, stdout_tx));
+        let (stderr_tx, stderr_rx) = mpsc::channel();
         thread::spawn(move || {
-            let mut reader = stderr;
-            let mut sink = std::io::sink();
-            let _ = std::io::copy(&mut reader, &mut sink);
+            let bounded = vocamesh_agent::execution::read_bounded_stderr(stderr);
+            let _ = stderr_tx.send(classify_cli_stderr(&bounded));
         });
+        drop(output_tx);
 
         let start = Instant::now();
         let mut stop_requested = false;
@@ -533,89 +700,118 @@ impl Worker {
             if !stop_requested && self.stop_rx.try_recv().is_ok() {
                 stop_requested = true;
                 if !terminate_process_tree(child, pid) {
-                    return Err("run.stop-unconfirmed");
+                    return ProcessCompletion::ExitUnconfirmed {
+                        error_code: "run.stop-unconfirmed",
+                        pid: Some(pid),
+                    };
                 }
             }
             if !timed_out && start.elapsed() >= self.runtime.run_timeout {
                 timed_out = true;
                 if !terminate_process_tree(child, pid) {
-                    return Err("run.stop-unconfirmed");
+                    return ProcessCompletion::ExitUnconfirmed {
+                        error_code: "run.stop-unconfirmed",
+                        pid: Some(pid),
+                    };
                 }
             }
-            drain_outputs(
+            if drain_outputs(
                 &self.runtime,
                 &self.run_id,
                 &output_rx,
                 &self.notify,
                 &mut final_summary,
                 &mut protocol_error,
-            )?;
+            )
+            .is_err()
+            {
+                return if terminate_process_tree(child, pid) {
+                    failure("storage.write-failed")
+                } else {
+                    ProcessCompletion::ExitUnconfirmed {
+                        error_code: "run.stop-unconfirmed",
+                        pid: Some(pid),
+                    }
+                };
+            }
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(status)) => {
+                    if process_group_exists(-(pid as i32)) {
+                        if !terminate_process_tree(child, pid) {
+                            return ProcessCompletion::ExitUnconfirmed {
+                                error_code: "run.stop-unconfirmed",
+                                pid: Some(pid),
+                            };
+                        }
+                        return ProcessCompletion::ExitedWithFailure {
+                            outcome: "child-process-remained",
+                            exit_code: status.code(),
+                            summary: None,
+                            error_code: "execution.child-process-remained",
+                        };
+                    }
+                    break status;
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(25)),
                 Err(_) => {
                     let _ = terminate_process_tree(child, pid);
-                    return Err("execution.process-status-unknown");
+                    return ProcessCompletion::ExitUnconfirmed {
+                        error_code: "execution.process-status-unknown",
+                        pid: Some(pid),
+                    };
                 }
             }
         };
         let drain_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < drain_deadline {
             match output_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(output) => self.store_output(output, &mut final_summary, &mut protocol_error)?,
+                Ok(output) => {
+                    if self
+                        .store_output(output, &mut final_summary, &mut protocol_error)
+                        .is_err()
+                    {
+                        return failure("storage.write-failed");
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
         let code = exit_status.code();
-        let (state, outcome, task_state, error) = if stop_requested {
-            (RunState::Finished, "stopped", "stopped", None)
+        let stderr_kind = stderr_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(CliFailureKind::Other);
+        if stop_requested {
+            ProcessCompletion::StoppedAndExited { exit_code: code }
         } else if timed_out {
-            (RunState::Finished, "timeout", "failed", Some("run.timeout"))
+            ProcessCompletion::TimedOutAndExited { exit_code: code }
         } else if protocol_error {
-            (
-                RunState::Crashed,
-                "output-protocol-error",
-                "failed",
-                Some("run.output-protocol-error"),
-            )
+            ProcessCompletion::ExitedWithFailure {
+                outcome: "output-protocol-error",
+                exit_code: code,
+                summary: final_summary,
+                error_code: "run.output-protocol-error",
+            }
         } else if !exit_status.success() {
-            (
-                RunState::Crashed,
-                "failed",
-                "failed",
-                Some("execution.cli-failed"),
-            )
+            ProcessCompletion::ExitedWithFailure {
+                outcome: "failed",
+                exit_code: code,
+                summary: final_summary,
+                error_code: stderr_kind.error_code(),
+            }
         } else if final_summary.is_none() {
-            (
-                RunState::Crashed,
-                "missing-final-result",
-                "failed",
-                Some("run.output-protocol-error"),
-            )
+            ProcessCompletion::ExitedWithFailure {
+                outcome: "missing-final-result",
+                exit_code: code,
+                summary: None,
+                error_code: "run.output-protocol-error",
+            }
         } else {
-            (RunState::Finished, "success", "done", None)
-        };
-        let summary = final_summary.as_deref();
-        let run = self
-            .runtime
-            .store
-            .lock()
-            .map_err(|_| "storage.write-failed")?
-            .finish(
-                &self.run_id,
-                RunFinish {
-                    run_state: state,
-                    outcome,
-                    task_state,
-                    exit_code: code,
-                    summary,
-                    error_code: error,
-                },
-            )
-            .map_err(|_| "storage.write-failed")?;
-        (self.notify)(RuntimeNotification::State(run));
-        Ok(())
+            ProcessCompletion::ExitedSuccessfully {
+                exit_code: code,
+                summary: final_summary.unwrap_or_default(),
+            }
+        }
     }
 
     fn store_output(
@@ -652,27 +848,14 @@ impl Worker {
         }
         Ok(())
     }
+}
 
-    fn finish_stopped(&self) -> Result<(), &'static str> {
-        let run = self
-            .runtime
-            .store
-            .lock()
-            .map_err(|_| "storage.write-failed")?
-            .finish(
-                &self.run_id,
-                RunFinish {
-                    run_state: RunState::Finished,
-                    outcome: "stopped",
-                    task_state: "stopped",
-                    exit_code: None,
-                    summary: None,
-                    error_code: None,
-                },
-            )
-            .map_err(|_| "storage.write-failed")?;
-        (self.notify)(RuntimeNotification::State(run));
-        Ok(())
+fn failure(error_code: &'static str) -> ProcessCompletion {
+    ProcessCompletion::ExitedWithFailure {
+        outcome: "failed",
+        exit_code: None,
+        summary: None,
+        error_code,
     }
 }
 
@@ -756,31 +939,6 @@ fn read_stream<R: std::io::Read>(mut reader: R, tx: mpsc::SyncSender<ClaudeOutpu
     }
 }
 
-fn inherit_safe_environment(command: &mut Command) {
-    const ALLOWED: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USER",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "NO_COLOR",
-        "CLAUDE_CONFIG_DIR",
-    ];
-    for key in ALLOWED {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-}
-
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child, pid: u32) -> bool {
     let group = -(pid as i32);
@@ -814,6 +972,11 @@ fn terminate_process_tree(child: &mut Child, pid: u32) -> bool {
 fn process_group_exists(group: i32) -> bool {
     let result = unsafe { libc::kill(group, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_group_exists(_group: i32) -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -922,6 +1085,17 @@ case "$*" in
     printf '{"type":"result","result":"failed"}\n'
     exit 7
     ;;
+  *diag*)
+    printf 'unknown option token=sk-ant-test-secret /Users/private/person\n' >&2
+    i=0
+    while [ "$i" -lt 8000 ]; do printf x >&2; i=$((i + 1)); done
+    exit 23
+    ;;
+  *orphan*)
+    sleep 30 &
+    printf '{"type":"result","result":"orphan started"}\n'
+    exit 0
+    ;;
   *protocol*)
     printf 'not-json\n'
     ;;
@@ -945,7 +1119,13 @@ esac
             .to_string(),
         )
         .unwrap();
-        ExecutionRuntime::open_with_timeout(config, data, run_timeout).unwrap()
+        ExecutionRuntime::open_with_policy(
+            config,
+            data,
+            run_timeout,
+            ManagedPolicyStatus::TestVerifiedSafe,
+        )
+        .unwrap()
     }
 
     #[cfg(unix)]
@@ -971,6 +1151,62 @@ esac
             assert!(Instant::now() < deadline, "fake Claude run did not finish");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(unix)]
+    fn pending_running_run(runtime: &ExecutionRuntime, request_id: &str, pid: u32) -> RunRecord {
+        let mut store = runtime.store.lock().unwrap();
+        let (_, run) = store
+            .create_pending(&request(request_id), "/tmp/synthetic-workspace")
+            .unwrap();
+        store
+            .set_state(&run.id, RunState::Starting, "starting", None)
+            .unwrap();
+        store
+            .set_state(&run.id, RunState::Running, "running", Some(pid))
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn worker_for(runtime: &ExecutionRuntime, run_id: &str, snapshot_path: PathBuf) -> Worker {
+        let (_stop_tx, stop_rx) = mpsc::sync_channel(1);
+        Worker {
+            runtime: runtime.clone(),
+            run_id: run_id.to_owned(),
+            prompt: "synthetic test".into(),
+            executable: PathBuf::new(),
+            environment: ExecutionEnvironment::current(),
+            snapshot_path,
+            stop_rx,
+            notify: Arc::new(|_| {}),
+        }
+    }
+
+    #[test]
+    fn managed_policy_uncertainty_blocks_readiness_and_task_start() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let config = root.path().join("config");
+        let data = root.path().join("data");
+        std::fs::create_dir(&config).unwrap();
+        let runtime = ExecutionRuntime::open_with_timeout(config, data, RUN_TIMEOUT).unwrap();
+
+        let readiness = runtime.readiness();
+        assert!(!readiness.ready);
+        assert_eq!(readiness.auth_state, AuthenticationState::Unknown);
+        assert!(readiness.message.contains("托管 Hook"));
+        let error = runtime
+            .start_read_only_task(
+                runtime_request(
+                    "00000000-0000-4000-8000-000000000190",
+                    workspace.path(),
+                    "synthetic prompt",
+                ),
+                |_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "execution.managed-policy-unverified");
+        assert!(runtime.list_tasks().unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -1001,6 +1237,11 @@ esac
         assert_eq!(same_run.id, run.id);
         assert_eq!(runtime.list_tasks().unwrap().len(), 1);
         assert_eq!(runtime.list_runs(None, 10).unwrap().items.len(), 1);
+        assert!(!runtime
+            .data_dir
+            .join("run-snapshots")
+            .join(&run.request_id)
+            .exists());
     }
 
     #[cfg(unix)]
@@ -1022,6 +1263,183 @@ esac
         assert_eq!(failed.outcome.as_deref(), Some("failed"));
         assert_eq!(failed.exit_code, Some(7));
         assert_eq!(runtime.get_task(&failed.task_id).unwrap().state, "failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_claude_stderr_is_classified_without_persisting_raw_content() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let req = runtime_request(
+            "00000000-0000-4000-8000-000000000106",
+            workspace.path(),
+            "diag task",
+        );
+        let (_, run) = runtime.start_read_only_task(req, |_| {}).unwrap();
+
+        let failed = wait_for_terminal(&runtime, &run.id);
+        let events = runtime.list_run_events(&run.id, 0, 10).unwrap();
+        let connection = rusqlite::Connection::open(runtime.data_dir.join("runs.sqlite3")).unwrap();
+        let stored: String = connection
+            .query_row(
+                "SELECT coalesce(summary,'') || coalesce(error_code,'') FROM runs WHERE id=?1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("execution.cli-invalid-arguments")
+        );
+        assert!(!stored.contains("sk-ant-test-secret"));
+        assert!(!stored.contains("/Users/private/person"));
+        assert!(events.iter().all(|event| {
+            !event.text.contains("sk-ant-test-secret")
+                && !event.text.contains("/Users/private/person")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_process_group_is_terminated_and_never_reported_as_success() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let req = runtime_request(
+            "00000000-0000-4000-8000-000000000107",
+            workspace.path(),
+            "orphan process test",
+        );
+        let (_, run) = runtime.start_read_only_task(req, |_| {}).unwrap();
+
+        let failed = wait_for_terminal(&runtime, &run.id);
+
+        assert_eq!(failed.outcome.as_deref(), Some("child-process-remained"));
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("execution.child-process-remained")
+        );
+        assert!(runtime.active.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_exit_retains_pid_and_snapshot_and_blocks_another_task() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let run = pending_running_run(&runtime, "00000000-0000-4000-8000-000000000108", 42_424);
+        let snapshot = runtime.data_dir.join("run-snapshots").join(&run.request_id);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("README.md"), "synthetic").unwrap();
+
+        worker_for(&runtime, &run.id, snapshot.clone()).finalize(
+            ProcessCompletion::ExitUnconfirmed {
+                error_code: "run.stop-unconfirmed",
+                pid: Some(42_424),
+            },
+        );
+
+        let unknown = runtime.get_run(&run.id).unwrap();
+        assert_eq!(unknown.state, RunState::Unknown);
+        assert_eq!(unknown.process_id, Some(42_424));
+        assert!(snapshot.join("README.md").exists());
+        let blocked = runtime
+            .start_read_only_task(
+                runtime_request(
+                    "00000000-0000-4000-8000-000000000109",
+                    workspace.path(),
+                    "do not retry",
+                ),
+                |_| {},
+            )
+            .unwrap_err();
+        assert_eq!(blocked.code, "execution.process-state-unknown");
+        assert_eq!(runtime.list_tasks().unwrap().len(), 1);
+
+        let unchanged = runtime
+            .store
+            .lock()
+            .unwrap()
+            .finish(
+                &run.id,
+                RunFinish {
+                    run_state: RunState::Finished,
+                    outcome: "success",
+                    task_state: "done",
+                    exit_code: Some(0),
+                    summary: Some("late success"),
+                    error_code: None,
+                    pid: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(unchanged.state, RunState::Unknown);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_terminal_write_keeps_snapshot_and_converts_run_to_unknown() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let run = pending_running_run(&runtime, "00000000-0000-4000-8000-000000000110", 42_425);
+        let snapshot = runtime.data_dir.join("run-snapshots").join(&run.request_id);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("README.md"), "synthetic").unwrap();
+        rusqlite::Connection::open(runtime.data_dir.join("runs.sqlite3"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_finished_run BEFORE UPDATE OF state ON runs
+                 WHEN NEW.state IN ('finished','crashed')
+                 BEGIN SELECT RAISE(FAIL, 'synthetic write failure'); END;",
+            )
+            .unwrap();
+
+        worker_for(&runtime, &run.id, snapshot.clone()).finalize(
+            ProcessCompletion::ExitedSuccessfully {
+                exit_code: Some(0),
+                summary: "synthetic result".into(),
+            },
+        );
+
+        let unresolved = runtime.get_run(&run.id).unwrap();
+        assert_eq!(unresolved.state, RunState::Unknown);
+        assert_eq!(
+            unresolved.error_code.as_deref(),
+            Some("storage.write-failed")
+        );
+        assert_eq!(unresolved.process_id, Some(42_425));
+        assert!(snapshot.join("README.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_cleanup_failure_does_not_rewrite_confirmed_result() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let run = pending_running_run(&runtime, "00000000-0000-4000-8000-000000000111", 42_426);
+        let parent = runtime.data_dir.join("run-snapshots");
+        std::fs::create_dir_all(&parent).unwrap();
+        let snapshot = parent.join(&run.request_id);
+        std::fs::write(&snapshot, "not a directory").unwrap();
+
+        worker_for(&runtime, &run.id, snapshot.clone()).finalize(
+            ProcessCompletion::ExitedSuccessfully {
+                exit_code: Some(0),
+                summary: "synthetic result".into(),
+            },
+        );
+
+        assert_eq!(
+            runtime.get_run(&run.id).unwrap().outcome.as_deref(),
+            Some("success")
+        );
+        assert_eq!(
+            std::fs::read_to_string(snapshot).unwrap(),
+            "not a directory"
+        );
     }
 
     #[cfg(unix)]
@@ -1097,6 +1515,14 @@ esac
 
         assert_eq!(requested.state, RunState::StopRequested);
         assert_eq!(stopped.outcome.as_deref(), Some("stopped"));
+        let active_deadline = Instant::now() + Duration::from_secs(1);
+        while !runtime.active.lock().unwrap().is_empty() {
+            assert!(
+                Instant::now() < active_deadline,
+                "stale worker channel remained"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
         assert!(runtime.active.lock().unwrap().is_empty());
     }
 

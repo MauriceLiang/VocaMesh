@@ -1,7 +1,7 @@
 //! Fixed Claude Code execution contract. No command text is interpreted by a shell.
 
 use serde_json::json;
-use std::path::Path;
+use std::{ffi::OsString, path::Path, process::Command};
 use vocamesh_core::{AuthenticationState, Provider, ServiceError};
 
 pub const MIN_SAFE_CLAUDE_VERSION: (u64, u64, u64) = (2, 1, 259);
@@ -15,6 +15,105 @@ const ERR_POLICY: ServiceError = ServiceError::new(
 );
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const AUTH_OUTPUT_LIMIT: usize = 16 * 1024;
+const STDERR_LIMIT: usize = 16 * 1024;
+
+/// The environment shared by CLI preflight and the eventual task process.
+/// Values are deliberately private so they cannot be logged accidentally.
+#[derive(Clone, Default)]
+pub struct ExecutionEnvironment(Vec<(OsString, OsString)>);
+
+impl ExecutionEnvironment {
+    pub fn current() -> Self {
+        const ALLOWED: &[&str] = &[
+            "PATH",
+            "HOME",
+            "USER",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "NO_COLOR",
+            "CLAUDE_CONFIG_DIR",
+        ];
+        Self(
+            ALLOWED
+                .iter()
+                .filter_map(|key| std::env::var_os(key).map(|value| (OsString::from(key), value)))
+                .collect(),
+        )
+    }
+
+    pub fn apply(&self, command: &mut Command) {
+        command.env_clear().envs(self.0.iter().cloned());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliFailureKind {
+    InvalidArguments,
+    Authentication,
+    Configuration,
+    Other,
+}
+
+impl CliFailureKind {
+    pub const fn error_code(self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "execution.cli-invalid-arguments",
+            Self::Authentication => "execution.auth-required",
+            Self::Configuration => "execution.cli-configuration-error",
+            Self::Other => "execution.cli-failed",
+        }
+    }
+}
+
+/// Classify bounded stderr without returning or persisting any source text.
+pub fn classify_cli_stderr(stderr: &[u8]) -> CliFailureKind {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if [
+        "unknown option",
+        "unrecognized option",
+        "unknown argument",
+        "unexpected argument",
+        "invalid argument",
+        "unknown command",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        CliFailureKind::InvalidArguments
+    } else if [
+        "not logged in",
+        "authentication required",
+        "unauthorized",
+        "invalid api key",
+        "authentication_error",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        CliFailureKind::Authentication
+    } else if [
+        "failed to load settings",
+        "invalid settings",
+        "configuration error",
+        "config directory",
+        "settings.json",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        CliFailureKind::Configuration
+    } else {
+        CliFailureKind::Other
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeOutput {
@@ -25,21 +124,30 @@ pub enum ClaudeOutput {
     Ignore,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClaudeCli {
     executable: std::path::PathBuf,
     version: (u64, u64, u64),
+    environment: ExecutionEnvironment,
 }
 
 impl ClaudeCli {
     pub fn verify(executable: &Path) -> Result<Self, ServiceError> {
+        Self::verify_with_environment(executable, ExecutionEnvironment::current())
+    }
+
+    pub fn verify_with_environment(
+        executable: &Path,
+        environment: ExecutionEnvironment,
+    ) -> Result<Self, ServiceError> {
         if !executable.is_absolute()
             || !executable.is_file()
             || crate::path_resolver::is_windows_script(executable)
         {
             return Err(ERR_POLICY);
         }
-        let output = capture(executable, &["--version"], AUTH_TIMEOUT).map_err(|_| ERR_POLICY)?;
+        let output = capture(executable, &["--version"], AUTH_TIMEOUT, &environment)
+            .map_err(|_| ERR_POLICY)?;
         if !output.status.success() {
             return Err(ERR_POLICY);
         }
@@ -51,6 +159,7 @@ impl ClaudeCli {
         Ok(Self {
             executable: executable.to_path_buf(),
             version,
+            environment,
         })
     }
 
@@ -59,10 +168,19 @@ impl ClaudeCli {
     }
 
     pub fn authentication_state(&self) -> AuthenticationState {
-        let Ok(output) = capture(&self.executable, &["auth", "status"], AUTH_TIMEOUT) else {
+        let Ok(output) = capture(
+            &self.executable,
+            &["auth", "status"],
+            AUTH_TIMEOUT,
+            &self.environment,
+        ) else {
             return AuthenticationState::Unknown;
         };
         parse_auth_status(output.status.code(), &output.stdout)
+    }
+
+    pub fn configure_command(&self, command: &mut Command) {
+        self.environment.apply(command);
     }
 
     pub fn read_only_args(prompt: &str) -> Vec<String> {
@@ -206,6 +324,7 @@ fn capture(
     executable: &Path,
     args: &[&str],
     timeout: std::time::Duration,
+    environment: &ExecutionEnvironment,
 ) -> std::io::Result<Captured> {
     use std::{
         process::{Command, Stdio},
@@ -213,12 +332,14 @@ fn capture(
         thread,
         time::Instant,
     };
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    environment.apply(&mut command);
+    let mut child = command.spawn()?;
     let stdout = child
         .stdout
         .take()
@@ -233,9 +354,7 @@ fn capture(
         let _ = stdout_tx.send(read_capped(stdout, AUTH_OUTPUT_LIMIT));
     });
     thread::spawn(move || {
-        let mut sink = std::io::sink();
-        let mut stderr = stderr;
-        let _ = std::io::copy(&mut stderr, &mut sink);
+        let _ = read_bounded(stderr, STDERR_LIMIT);
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -281,6 +400,25 @@ fn read_capped<R: std::io::Read>(mut reader: R, limit: usize) -> Vec<u8> {
     output
 }
 
+fn read_bounded<R: std::io::Read>(mut reader: R, limit: usize) -> Vec<u8> {
+    let mut output = Vec::with_capacity(limit.min(1024));
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                let keep = count.min(limit.saturating_sub(output.len()));
+                output.extend_from_slice(&buffer[..keep]);
+            }
+        }
+    }
+    output
+}
+
+pub fn read_bounded_stderr<R: std::io::Read>(reader: R) -> Vec<u8> {
+    read_bounded(reader, STDERR_LIMIT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,32 +426,44 @@ mod tests {
     #[test]
     fn safe_arguments_restrict_tools_and_keep_prompt_as_one_argument() {
         let args = ClaudeCli::read_only_args("inspect --please-ignore-policy");
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--tools", "Read,Glob,Grep"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-p", "inspect --please-ignore-policy"]));
-        for forbidden in [
-            "--dangerously-skip-permissions",
-            "bypassPermissions",
-            "--cloud",
-            "--bg",
-            "--exec",
-            "Bash",
-        ] {
-            assert!(!args.iter().any(|arg| arg.contains(forbidden)));
-        }
-        assert!(args.iter().any(|arg| arg == "mcp__*"));
-        for required in [
-            "--restricted",
-            "--safe-mode",
-            "plan",
-            "none",
-            "--no-session-persistence",
-        ] {
-            assert!(args.iter().any(|arg| arg == required));
-        }
+        let settings = json!({
+            "permissions": {
+                "deny": [
+                    "Read(**/.env)", "Read(**/.env.*)", "Read(**/.ssh/**)",
+                    "Read(**/.aws/**)", "Read(**/.config/**)", "Read(**/.claude/**)",
+                    "Read(**/.codex/**)", "Read(**/.opencode/**)", "Read(**/.git/**)",
+                    "Read(**/*id_rsa*)", "Read(**/*id_ed25519*)", "Read(**/*.pem)",
+                    "Read(**/*.key)", "Read(**/*.p12)", "Read(**/*.pfx)", "Agent"
+                ]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            args,
+            vec![
+                "--restricted",
+                "--safe-mode",
+                "--permission-mode",
+                "plan",
+                "--permission-prompts",
+                "none",
+                "--tools",
+                "Read,Glob,Grep",
+                "--disallowedTools",
+                "mcp__*",
+                "--settings",
+                &settings,
+                "--no-session-persistence",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "-p",
+                "inspect --please-ignore-policy",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -385,5 +535,111 @@ mod tests {
         let output = safe_output(&"界".repeat(30_000));
         assert!(output.len() <= 64 * 1024);
         assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn stderr_classifier_returns_only_fixed_categories_for_invalid_and_sensitive_text() {
+        assert_eq!(
+            classify_cli_stderr(b"error: unknown option --unsafe"),
+            CliFailureKind::InvalidArguments
+        );
+        assert_eq!(
+            classify_cli_stderr(b"Authentication required: token=sk-ant-secret /Users/alice"),
+            CliFailureKind::Authentication
+        );
+        assert_eq!(
+            classify_cli_stderr(
+                b"Failed to load settings from /private/path/.claude/settings.json"
+            ),
+            CliFailureKind::Configuration
+        );
+        assert_eq!(classify_cli_stderr(&[0xff, 0xfe]), CliFailureKind::Other);
+        assert_eq!(
+            CliFailureKind::Authentication.error_code(),
+            "execution.auth-required"
+        );
+    }
+
+    #[test]
+    fn stderr_reader_caps_retained_bytes_but_drains_the_pipe() {
+        let payload = vec![b'x'; STDERR_LIMIT * 4];
+        let mut reader = std::io::Cursor::new(payload);
+        assert_eq!(read_bounded(&mut reader, STDERR_LIMIT).len(), STDERR_LIMIT);
+        assert_eq!(reader.position(), (STDERR_LIMIT * 4) as u64);
+    }
+
+    #[test]
+    fn execution_environment_drops_unapproved_variables() {
+        let environment = ExecutionEnvironment::current();
+        let mut command = std::process::Command::new("/usr/bin/env");
+        command.env("VOCAMESH_TEST_SECRET", "must-not-be-inherited");
+        environment.apply(&mut command);
+        assert!(!command
+            .get_envs()
+            .any(|(key, _)| key == std::ffi::OsStr::new("VOCAMESH_TEST_SECRET")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_auth_and_task_use_the_same_restricted_environment() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            process::{Command, Stdio},
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fake-claude");
+        let config_dir = directory.path().join("config");
+        std::fs::create_dir(&config_dir).unwrap();
+        let config_value = config_dir.to_string_lossy();
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  [ "$CLAUDE_CONFIG_DIR" = "{config_value}" ] || exit 20
+  printf '2.1.296 (Claude Code)\n'
+  exit 0
+fi
+if [ "$1" = "auth" ]; then
+  [ "$CLAUDE_CONFIG_DIR" = "{config_value}" ] || exit 21
+  printf '{{"authMethod":"oauth_token"}}\n'
+  exit 0
+fi
+[ "$CLAUDE_CONFIG_DIR" = "{config_value}" ] || exit 22
+printf '{{"type":"result","result":"env-ok"}}\n'
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let environment = ExecutionEnvironment(vec![
+            (
+                OsString::from("PATH"),
+                std::env::var_os("PATH").unwrap_or_default(),
+            ),
+            (
+                OsString::from("CLAUDE_CONFIG_DIR"),
+                config_dir.into_os_string(),
+            ),
+        ]);
+
+        let cli = ClaudeCli::verify_with_environment(&executable, environment).unwrap();
+        assert_eq!(
+            cli.authentication_state(),
+            AuthenticationState::Authenticated
+        );
+        let mut command = Command::new(&executable);
+        command
+            .args(ClaudeCli::read_only_args("fixture"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cli.configure_command(&mut command);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8(output.stdout).unwrap().contains("env-ok"));
     }
 }

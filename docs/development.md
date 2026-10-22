@@ -22,23 +22,35 @@ pnpm --dir frontend tauri dev
 pnpm --dir frontend tauri build
 ```
 
-Tauri 配置位于 `frontend/src-tauri/tauri.conf.json`。首次任务选择本机目录、查看 Claude Code readiness、确认只读范围和数据发送后，才会向 Runtime 提交任务。Runtime 在 Unix 上启动过滤快照；Windows 目前显示不可执行。
+Tauri 配置位于 `frontend/src-tauri/tauri.conf.json`。开始任务前需通过策略、CLI 版本和认证 readiness，并确认只读范围与数据发送。当前 Unix/macOS 因 managed hooks 无法可靠核验而 fail-closed；Windows 也显示不可执行。Unix 快照使用已验证的工作区目录描述符；符号链接、特殊文件或复制错误会阻止启动。
 
 ## 本地质量门禁
 
+在仓库根目录运行：
+
 ```bash
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend typecheck
-pnpm --dir frontend test
-pnpm --dir frontend build
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo check --workspace --all-targets --all-features
+./scripts/verify-local.sh
 ```
 
-本地脚本由开发者运行。按仓库维护者要求，当前没有 GitHub Actions workflow；推送后不会自动产生 CI 结果。Playwright E2E 需要显式安装浏览器并单独记录结果。
+PowerShell：
+
+```powershell
+./scripts/verify-local.ps1
+```
+
+脚本逐条记录 PASS/FAIL/BLOCKED，并在任何失败或缺少命令时以非零状态退出。执行检查为：
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`
+- `cargo test --workspace --offline --quiet`
+- `cargo check --workspace --all-targets --all-features --offline`
+- `pnpm --dir frontend typecheck`
+- `pnpm --dir frontend test`
+- `pnpm --dir frontend build`
+- `git diff --check`
+
+脚本不安装依赖、不登录、不调用真实模型。按仓库维护者要求，当前没有 GitHub Actions workflow；推送后不会自动产生 CI 结果。Playwright E2E 需要显式安装浏览器并单独记录结果。PowerShell 脚本仅在 Windows PowerShell 环境实际执行后才能记为通过。
 
 ## 真实 CLI 与平台验收
 
-自动化用例覆盖纯解析、过滤快照、SQLite 状态/容量/恢复、Unix fake CLI 成功/非零退出/停止/超时/畸形输出协议与幂等，以及前端 Mock/Tauri 服务边界。Fake CLI 不访问真实账号或模型。真实登录、模型请求、费用、桌面 GUI/目录选择、停止和文件哈希对比需在开发者明确确认后手工运行；不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。
+自动化用例覆盖纯解析、目录描述符快照、实际复制上限、SQLite unknown/恢复、Unix fake CLI 成功/失败/停止/超时/孤儿进程组/诊断脱敏，以及前端 readiness 门禁。Fake CLI 不访问真实账号或模型。真实模型请求只有在 M1–M3 策略门禁通过且开发者另行明确授权后才能手工运行；当前 managed hooks 风险未能可靠排除，真实任务验收应标记 BLOCKED。GUI/目录选择、桌面停止和重启恢复须在有完整 Xcode 和桌面会话的机器上单独验收；不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。
