@@ -6,9 +6,9 @@
 
 - 仓库：`MauriceLiang/VocaMesh`
 - 分支：`feature/runtime-foundation`
-- 基线：`origin/main`，`0f6e6429f83eb5e55be0b5fa1b279ce1dc24d3be`。实施文档中的 `e6d6482...` 不存在于当前远端引用。
-- 实施提交 SHA：待提交后填写
-- PR：待推送后填写
+- 基线：`origin/main`，`e6d6482041114278989912c4133d50bd8a502f92`，已合入本分支。
+- 实施提交 SHA：`b77a510ecc1582da75715a50d06a237fbe7af38e`；集成提交：`ff452e2c4143fa8c4a39d50009952407ddfa7fb2`
+- PR：[#2 Runtime Foundation v0.2](https://github.com/MauriceLiang/VocaMesh/pull/2)
 
 ## 实际工具版本
 
@@ -31,7 +31,7 @@
 - `cargo test --workspace`：通过，18 个单元测试全部通过；桌面 crate 与文档测试无用例。
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`：通过。
 - `pnpm --dir frontend typecheck`：通过。
-- `pnpm --dir frontend test`：通过，5 个测试文件、16 个测试全部通过。
+- `pnpm --dir frontend test`：通过，6 个测试文件、25 个测试全部通过。
 - `pnpm --dir frontend build`：通过，Vite 生产构建完成。
 - `git diff --check`：通过。
 - `pnpm --dir frontend tauri dev`：Rust 应用编译并报告启动；未观察到可验收的原生窗口。
