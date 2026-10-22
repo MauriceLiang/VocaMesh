@@ -32,6 +32,7 @@ import type {
   ToolService,
   WorkspaceService,
 } from "@/services/contracts";
+import type { Services } from "@/services/contracts";
 import { MockDb, newId } from "./db";
 
 /** 极简事件总线：仅内存，替代 Tauri 事件通道。 */
@@ -57,24 +58,13 @@ function statusForTool(state: LocalTool["state"]): AgentState {
 /** 演示用延迟：明确不做“假装真实执行”的动画，只用于体现排队/安全边界等状态。 */
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export interface MockServices {
-  agents: AgentService;
-  tools: ToolService;
-  teams: TeamService;
-  tasks: TaskService;
-  approvals: ApprovalService;
-  runs: RunService;
-  workspaces: WorkspaceService;
-  settings: SettingsService;
-  notifications: NotificationService;
-  events: EventService;
-}
+export type MockServices = Services;
 
-export function createMockServices(): MockServices {
+export function createMockServices(): Services {
   const db = new MockDb();
   const taskBus = new Emitter<Task>();
   const approvalBus = new Emitter<ApprovalRequest>();
-  const scanBus = new Emitter<{ phase: "scanning" | "done"; message: string }>();
+  const scanBus = new Emitter<{ phase: "scanning" | "done" | "failed"; message?: string }>();
 
   const findTask = (id: string): Task => {
     const task = db.tasks.find((item) => item.id === id);

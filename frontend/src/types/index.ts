@@ -46,6 +46,8 @@ export type SubtaskState =
 
 /** 本地执行工具（CLI / 适配器）状态。 */
 export type ToolState = "ready" | "pending" | "auth-required" | "missing" | "incompatible" | "undetectable";
+export type ToolAuthState = "authenticated" | "unauthenticated" | "unknown" | "unsupported";
+export type ToolSource = "path" | "standard-location" | "manual";
 
 /** Run（执行尝试）状态。不可覆盖：重试产生新 Run。 */
 export type RunState = "pending" | "starting" | "running" | "waiting-input" | "stop-requested" | "finished" | "crashed" | "unknown";
@@ -109,6 +111,11 @@ export interface LocalTool {
   state: ToolState;
   /** 面向用户的解释（为什么是这个状态、下一步做什么）。 */
   note: string;
+  /** 认证和安装状态分开；未知或不支持不会映射为 ready。 */
+  authState?: ToolAuthState;
+  /** Unix epoch milliseconds. */
+  detectedAt?: number;
+  source?: ToolSource;
 }
 
 export interface TeamMember {
