@@ -71,7 +71,7 @@ async function prepare(): Promise<void> {
     nativeReadiness.value = null;
     nativeLoading.value = true;
     try { nativeReadiness.value = await services.execution.readiness(); }
-    catch { nativeReadiness.value = { ready: false, version: null, authState: "unknown", message: "无法读取 Claude Code 就绪状态" }; }
+    catch { nativeReadiness.value = { ready: false, version: null, authState: "unknown", message: "无法读取本机执行安全状态" }; }
     finally { nativeLoading.value = false; }
     return;
   }
@@ -169,8 +169,8 @@ async function submitNative(): Promise<void> {
   <VocaDialog
     :model-value="modelValue"
     title="创建任务"
-    :subtitle="isNative ? '真实 Claude Code 本机只读任务；开始前会创建过滤后的临时工作区副本。' : mode === 'custom' ? '计划编辑尚未实现；此模式只会创建待配置占位任务，不会开始执行。' : '提交后先进入排队，运行环境检查通过才会开始执行。'"
-    :footer-hint="isNative ? '只有你确认后才启动 Claude Code；Prompt 和读取到的内容可能发送至模型提供方。' : undefined"
+    :subtitle="isNative ? '本机 Claude Code 只读任务；仅在运行策略、CLI 与认证检查全部通过时可提交。' : mode === 'custom' ? '计划编辑尚未实现；此模式只会创建待配置占位任务，不会开始执行。' : '提交后先进入排队，运行环境检查通过才会开始执行。'"
+    :footer-hint="isNative ? '启动前必须通过运行策略检查并由你确认；Prompt 和读取到的内容可能发送至模型提供方。' : undefined"
     :width="760"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -196,14 +196,14 @@ async function submitNative(): Promise<void> {
       </div>
       <div class="v-banner is-neutral" :style="{ alignItems: 'flex-start' }">
         <AlertTriangle :size="13" />
-        <span class="v-tiny" :style="{ lineHeight: 1.5 }">只读工具白名单：Read、Glob、Grep。Shell、写入、MCP 和子 Agent 被禁用。VocaMesh 会跳过常见凭据目录/文件及符号链接，并在应用数据目录创建临时快照；读取到的文件、Prompt 和输出可能发送给 Claude 模型提供方并保存在本机任务历史中。规则无法识别所有秘密，请勿在 Prompt 中填写密码或 Token。</span>
+        <span class="v-tiny" :style="{ lineHeight: 1.5 }">只读工具白名单：Read、Glob、Grep。Shell、写入、MCP 和子 Agent 被禁用。VocaMesh 会排除常见凭据目录/文件；发现符号链接或无法安全复制的文件时会阻止任务，并在应用数据目录创建临时快照。读取到的文件、Prompt 和输出可能发送给 Claude 模型提供方并保存在本机任务历史中。规则无法识别所有秘密，请勿在 Prompt 中填写密码或 Token。</span>
       </div>
       <label class="flex items-start gap-2 text-[11.5px]">
         <input v-model="nativeConsent" type="checkbox" :disabled="nativeLoading" />
         <span>我确认所选目录和只读范围，并同意将任务所需内容发送给 Claude 模型提供方；我知道 Prompt、结果和目录路径会保存到本机应用数据。</span>
       </label>
       <div class="v-banner" :class="nativeReadiness?.ready ? 'is-neutral' : 'is-blocked'">
-        <span class="v-tiny">{{ nativeLoading ? '正在检查 Claude Code 版本与登录状态…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
+        <span class="v-tiny">{{ nativeLoading ? '正在检查组织托管策略、CLI 版本与登录状态…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
       </div>
       <div v-if="optionsError" class="v-banner is-failure"><AlertTriangle :size="13" /><span class="v-tiny">{{ optionsError }}</span></div>
     </template>
