@@ -2,7 +2,7 @@ import type { ExecutionReadiness, NativeRunEvent, NativeRunRecord, NativeTaskRec
 
 export interface ExecutionService {
   selectWorkspaceDirectory(): Promise<string | null>;
-  readiness(): Promise<ExecutionReadiness>;
+  readiness(providerId: "claude" | "codex"): Promise<ExecutionReadiness>;
   listUnknownRuns(): Promise<UnknownRunSummary[]>;
   inspectUnknownRun(runId: string): Promise<RecoveryInspection>;
   resolveUnknownRun(runId: string, userConfirmed: boolean): Promise<RecoveryResolution>;

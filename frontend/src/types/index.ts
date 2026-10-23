@@ -344,7 +344,7 @@ export interface StartReadOnlyTaskInput {
   requestId: string;
   title: string;
   prompt: string;
-  providerId: "claude";
+  providerId: "claude" | "codex";
   workspacePath: string;
   consent: boolean;
 }

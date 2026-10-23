@@ -78,10 +78,10 @@ const PROVIDERS: [ProviderDescriptor; 3] = [
         adapter: "codex-cli",
         discovery_supported: true,
         version_probe_supported: true,
-        execution_adapter_available: false,
+        execution_adapter_available: true,
         authentication_probe_supported: false,
         minimum_version: None,
-        unsupported_reason_code: Some("tool.adapter-unavailable"),
+        unsupported_reason_code: None,
     },
     ProviderDescriptor {
         id: "opencode",
@@ -330,11 +330,8 @@ mod tests {
         let codex = Provider::Codex.capabilities();
         assert!(codex.discovery_supported);
         assert!(codex.version_probe_supported);
-        assert!(!codex.execution_adapter_available);
+        assert!(codex.execution_adapter_available);
         assert!(!codex.authentication_probe_supported);
-        assert_eq!(
-            codex.unsupported_reason_code.as_deref(),
-            Some("tool.adapter-unavailable")
-        );
+        assert_eq!(codex.unsupported_reason_code, None);
     }
 }

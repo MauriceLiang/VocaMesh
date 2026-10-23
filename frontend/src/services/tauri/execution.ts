@@ -23,7 +23,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export function createTauriExecutionService(): ExecutionService {
   return {
     selectWorkspaceDirectory: () => call<string | null>("select_workspace_directory"),
-    readiness: () => call<ExecutionReadiness>("get_execution_readiness"),
+    readiness: (providerId) => call<ExecutionReadiness>("get_execution_readiness", { providerId }),
     listUnknownRuns: () => call<UnknownRunSummary[]>("list_unknown_runs"),
     inspectUnknownRun: (runId) => call<RecoveryInspection>("inspect_unknown_run", { runId }),
     resolveUnknownRun: (runId, userConfirmed) => call<RecoveryResolution>("resolve_unknown_run", { runId, userConfirmed }),

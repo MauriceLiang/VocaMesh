@@ -1,6 +1,7 @@
 //! Local single-run execution lifecycle and SQLite history.
 
 mod catalog_store;
+mod provider_policy;
 mod snapshot;
 mod store;
 
@@ -10,17 +11,19 @@ use crate::{
 };
 use std::{
     collections::HashMap,
+    io::Write,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
-use vocamesh_agent::execution::{
-    classify_cli_stderr, ClaudeCli, ClaudeOutput, CliFailureKind, ExecutionEnvironment,
-};
 #[cfg(not(windows))]
 use vocamesh_agent::AgentRuntime;
+use vocamesh_agent::{
+    execution::ExecutionEnvironment,
+    runner::{parse_provider_output, runner_for, ProviderOutput, ProviderRunner},
+};
 use vocamesh_core::{
     AddTeamMemberInput, AgentRole, AppearanceSettings, AuthenticationState, CatalogStatus,
     CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness, ExecutionRequest,
@@ -29,6 +32,7 @@ use vocamesh_core::{
     UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput, WorkspaceRecord,
 };
 
+#[cfg(windows)]
 const ERR_CLI: ServiceError = ServiceError::new(
     "execution.cli-not-ready",
     "Claude Code CLI 未通过安全版本检查",
@@ -36,6 +40,10 @@ const ERR_CLI: ServiceError = ServiceError::new(
 const ERR_AUTH: ServiceError = ServiceError::new(
     "execution.auth-required",
     "Claude Code 尚未确认已登录，请先在 CLI 中完成登录",
+);
+const ERR_AUTH_UNKNOWN: ServiceError = ServiceError::new(
+    "execution.auth-unknown",
+    "无法确认 Provider 登录状态；请检查 CLI 后重新验证",
 );
 const ERR_CONSENT: ServiceError = ServiceError::new(
     "execution.consent-required",
@@ -47,9 +55,9 @@ const ERR_PROCESS_UNKNOWN: ServiceError = ServiceError::new(
     "execution.process-state-unknown",
     "先前 Claude Code 进程状态无法确认；为避免重复启动，真实执行已暂停",
 );
-const ERR_POLICY_UNVERIFIED: ServiceError = ServiceError::new(
-    "execution.managed-policy-unverified",
-    "无法确认 Claude Code 的组织托管 Hook 是否会产生额外副作用；真实执行已禁用",
+const ERR_CODEX_POLICY_UNVERIFIED: ServiceError = ServiceError::new(
+    "execution.codex-safety-unverified",
+    "Codex 的配置、凭据、文件、进程和网络边界尚未证明；真实执行已禁用",
 );
 const ERR_SETTINGS_INVALID: ServiceError = ServiceError::new("settings.invalid", "外观设置值无效");
 const ERR_DUPLICATE: ServiceError =
@@ -94,6 +102,8 @@ enum ManagedPolicyStatus {
     Unverified,
     #[cfg(test)]
     TestVerifiedSafe,
+    #[cfg(test)]
+    TestCodexSafe,
 }
 
 impl ExecutionRuntime {
@@ -148,6 +158,10 @@ impl ExecutionRuntime {
     }
 
     pub fn readiness(&self) -> ExecutionReadiness {
+        self.readiness_for(Provider::Claude)
+    }
+
+    pub fn readiness_for(&self, provider: Provider) -> ExecutionReadiness {
         let store = match self.store.lock() {
             Ok(store) => store,
             Err(_) => return not_ready("storage.read-failed", "本地任务历史无法读取"),
@@ -184,21 +198,30 @@ impl ExecutionRuntime {
         }
         #[cfg(not(windows))]
         {
-            if self.managed_policy == ManagedPolicyStatus::Unverified {
-                return not_ready(ERR_POLICY_UNVERIFIED.code, ERR_POLICY_UNVERIFIED.message);
+            if provider == Provider::Codex {
+                return not_ready_with_auth(
+                    ERR_CODEX_POLICY_UNVERIFIED.code,
+                    ERR_CODEX_POLICY_UNVERIFIED.message,
+                    AuthenticationState::Unsupported,
+                );
             }
+            if let Err(error) =
+                provider_policy::evaluate(provider, self.managed_policy_is_verified())
+            {
+                return not_ready(error.code, error.message);
+            }
+            let environment = ExecutionEnvironment::current_for(provider);
             let tools = AgentRuntime::new(self.config_dir.clone());
-            let Ok(path) = tools.executable_path(Provider::Claude) else {
-                return not_ready("execution.cli-not-found", "未找到受支持的 Claude Code CLI");
+            let Ok(path) = tools.executable_path(provider) else {
+                return not_ready("execution.cli-not-found", "未找到受支持的 Provider CLI");
             };
-            let environment = ExecutionEnvironment::current();
-            let Ok(cli) = ClaudeCli::verify_with_environment(&path, environment) else {
+            let Ok(runner) = runner_for(provider, path, environment) else {
                 return not_ready(
                     "execution.cli-incompatible",
-                    "Claude Code CLI 版本或安全参数不兼容",
+                    "Provider CLI 版本或安全参数不兼容",
                 );
             };
-            let auth_state = cli.authentication_state();
+            let auth_state = runner.probe().unwrap_or(AuthenticationState::Unknown);
             let ready = auth_state == AuthenticationState::Authenticated;
             let reason_code = match auth_state {
                 AuthenticationState::Authenticated => None,
@@ -210,16 +233,11 @@ impl ExecutionRuntime {
             let message = match auth_state {
                 AuthenticationState::Authenticated => "Claude Code CLI 已登录，可开始单次只读任务",
                 AuthenticationState::Unauthenticated => "Claude Code CLI 未登录，请先在 CLI 中登录",
-                _ => "无法确认 Claude Code 登录状态，已阻止执行",
+                _ => "无法确认 Provider 登录状态，已阻止执行",
             };
             ExecutionReadiness {
                 ready,
-                version: Some(format!(
-                    "{}.{}.{}",
-                    cli.version().0,
-                    cli.version().1,
-                    cli.version().2
-                )),
+                version: runner.version(),
                 auth_state,
                 message: message.into(),
                 reason_code,
@@ -429,6 +447,9 @@ impl ExecutionRuntime {
     {
         let _gate = self.start_gate.lock().map_err(|_| ERR_RUNNING)?;
         validate_request(&request)?;
+        let provider = request.provider_id.parse::<Provider>().map_err(|_| {
+            ServiceError::new("execution.provider-not-supported", "Provider 当前不可执行")
+        })?;
         {
             let store = self.store.lock().map_err(|_| storage_read())?;
             if let Some(existing) = store.has_request(&request.request_id)? {
@@ -436,7 +457,8 @@ impl ExecutionRuntime {
                 let requested_workspace = std::fs::canonicalize(&request.workspace_path)
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| request.workspace_path.clone());
-                if task.title != request.title
+                if task.provider_id != request.provider_id
+                    || task.title != request.title
                     || task.prompt != request.prompt
                     || task.workspace_path != requested_workspace
                 {
@@ -451,21 +473,21 @@ impl ExecutionRuntime {
                 return Err(ERR_PROCESS_UNKNOWN);
             }
         }
-        if self.managed_policy == ManagedPolicyStatus::Unverified {
-            return Err(ERR_POLICY_UNVERIFIED);
-        }
-        let environment = ExecutionEnvironment::current();
+        self.ensure_provider_policy(provider)?;
+        let environment = ExecutionEnvironment::current_for(provider);
         let executable = AgentRuntime::new(self.config_dir.clone())
-            .executable_path(Provider::Claude)
-            .map_err(|_| ERR_CLI)?;
-        let cli = ClaudeCli::verify_with_environment(&executable, environment.clone())
-            .map_err(|_| ERR_CLI)?;
-        let auth = cli.authentication_state();
-        if auth == AuthenticationState::Unauthenticated {
-            return Err(ERR_AUTH);
-        }
-        if auth != AuthenticationState::Authenticated {
-            return Err(ERR_CLI);
+            .executable_path(provider)
+            .map_err(|_| {
+                ServiceError::new("execution.cli-not-found", "未找到受支持的 Provider CLI")
+            })?;
+        let runner = runner_for(provider, executable, environment)?;
+        match runner.probe()? {
+            AuthenticationState::Authenticated => {}
+            AuthenticationState::Unauthenticated => return Err(ERR_AUTH),
+            AuthenticationState::Unsupported if self.test_codex_policy_allowed() => {}
+            AuthenticationState::Unknown | AuthenticationState::Unsupported => {
+                return Err(ERR_AUTH_UNKNOWN)
+            }
         }
         let workspace = validate_workspace(&request.workspace_path, &self.data_dir)?;
         let snapshot_path = self
@@ -495,8 +517,7 @@ impl ExecutionRuntime {
             runtime: self.clone(),
             run_id: run.id.clone(),
             prompt: request.prompt,
-            executable,
-            environment,
+            runner,
             snapshot_path,
             stop_rx,
             notify: Arc::new(notify),
@@ -526,6 +547,34 @@ impl ExecutionRuntime {
             return Ok((task, finished));
         }
         Ok((task, run))
+    }
+
+    fn ensure_provider_policy(&self, provider: Provider) -> Result<(), ServiceError> {
+        if self.test_codex_policy_allowed() && provider == Provider::Codex {
+            return Ok(());
+        }
+        provider_policy::evaluate(provider, self.managed_policy_is_verified())
+    }
+
+    fn managed_policy_is_verified(&self) -> bool {
+        match self.managed_policy {
+            ManagedPolicyStatus::Unverified => false,
+            #[cfg(test)]
+            ManagedPolicyStatus::TestVerifiedSafe => true,
+            #[cfg(test)]
+            ManagedPolicyStatus::TestCodexSafe => false,
+        }
+    }
+
+    fn test_codex_policy_allowed(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.managed_policy == ManagedPolicyStatus::TestCodexSafe
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
 
     pub fn stop_run<F>(&self, run_id: &str, notify: F) -> Result<RunRecord, ServiceError>
@@ -831,8 +880,7 @@ struct Worker {
     runtime: ExecutionRuntime,
     run_id: String,
     prompt: String,
-    executable: PathBuf,
-    environment: ExecutionEnvironment,
+    runner: Arc<dyn ProviderRunner>,
     snapshot_path: PathBuf,
     stop_rx: mpsc::Receiver<()>,
     notify: Arc<dyn Fn(RuntimeNotification) + Send + Sync>,
@@ -976,13 +1024,14 @@ impl Worker {
         if self.stop_rx.try_recv().is_ok() {
             return ProcessCompletion::StoppedAndExited { exit_code: None };
         }
-        let cli =
-            match ClaudeCli::verify_with_environment(&self.executable, self.environment.clone()) {
-                Ok(cli) => cli,
-                Err(_) => return failure("execution.cli-not-ready"),
-            };
-        if cli.authentication_state() != AuthenticationState::Authenticated {
-            return failure("execution.auth-required");
+        if let Err(error) = self.runtime.ensure_provider_policy(self.runner.provider()) {
+            return failure(error.code);
+        }
+        match self.runner.probe() {
+            Ok(AuthenticationState::Authenticated) => {}
+            Ok(_) if self.runtime.test_codex_policy_allowed() => {}
+            Ok(AuthenticationState::Unauthenticated) => return failure("execution.auth-required"),
+            Ok(_) | Err(_) => return failure("execution.auth-unknown"),
         }
         let starting = match self.runtime.store.lock() {
             Ok(mut store) => {
@@ -1004,14 +1053,10 @@ impl Worker {
             Err(_) => return failure("storage.read-failed"),
             _ => {}
         }
-        let mut command = Command::new(&self.executable);
-        command
-            .args(ClaudeCli::read_only_args(&self.prompt))
-            .current_dir(&self.snapshot_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        cli.configure_command(&mut command);
+        let mut command = self
+            .runner
+            .launch_command(&self.prompt, &self.snapshot_path);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -1070,21 +1115,44 @@ impl Worker {
                 }
             };
         };
-        let (output_tx, output_rx) = mpsc::sync_channel::<ClaudeOutput>(128);
+        if self.runner.prompt_on_stdin() {
+            let Some(mut stdin) = child.stdin.take() else {
+                return if terminate_process_tree(child, pid) {
+                    failure("execution.stdin-unavailable")
+                } else {
+                    ProcessCompletion::ExitUnconfirmed {
+                        error_code: "run.stop-unconfirmed",
+                        pid: Some(pid),
+                    }
+                };
+            };
+            if stdin.write_all(self.prompt.as_bytes()).is_err() {
+                return if terminate_process_tree(child, pid) {
+                    failure("execution.stdin-write-failed")
+                } else {
+                    ProcessCompletion::ExitUnconfirmed {
+                        error_code: "run.stop-unconfirmed",
+                        pid: Some(pid),
+                    }
+                };
+            }
+        }
+        let (output_tx, output_rx) = mpsc::sync_channel::<ProviderOutput>(128);
         let stdout_tx = output_tx.clone();
-        thread::spawn(move || read_stream(stdout, stdout_tx));
+        let provider = self.runner.provider();
+        thread::spawn(move || read_stream(stdout, stdout_tx, provider));
         let (stderr_tx, stderr_rx) = mpsc::channel();
+        let runner = Arc::clone(&self.runner);
         thread::spawn(move || {
             let bounded = vocamesh_agent::execution::read_bounded_stderr(stderr);
-            let _ = stderr_tx.send(classify_cli_stderr(&bounded));
+            let _ = stderr_tx.send(runner.classify_failure(&bounded));
         });
         drop(output_tx);
 
         let start = Instant::now();
         let mut stop_requested = false;
         let mut timed_out = false;
-        let mut protocol_error = false;
-        let mut final_summary: Option<String> = None;
+        let mut output_state = OutputState::default();
         let exit_status = loop {
             if !stop_requested && self.stop_rx.try_recv().is_ok() {
                 stop_requested = true;
@@ -1109,8 +1177,7 @@ impl Worker {
                 &self.run_id,
                 &output_rx,
                 &self.notify,
-                &mut final_summary,
-                &mut protocol_error,
+                &mut output_state,
             )
             .is_err()
             {
@@ -1155,9 +1222,14 @@ impl Worker {
         while Instant::now() < drain_deadline {
             match output_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(output) => {
-                    if self
-                        .store_output(output, &mut final_summary, &mut protocol_error)
-                        .is_err()
+                    if store_output(
+                        &self.runtime,
+                        &self.run_id,
+                        output,
+                        &self.notify,
+                        &mut output_state,
+                    )
+                    .is_err()
                     {
                         return failure("storage.write-failed");
                     }
@@ -1167,14 +1239,22 @@ impl Worker {
             }
         }
         let code = exit_status.code();
-        let stderr_kind = stderr_rx
+        let stderr_error = stderr_rx
             .recv_timeout(Duration::from_secs(2))
-            .unwrap_or(CliFailureKind::Other);
+            .unwrap_or("execution.cli-failed");
+        let final_summary = output_state.summary;
         if stop_requested {
             ProcessCompletion::StoppedAndExited { exit_code: code }
         } else if timed_out {
             ProcessCompletion::TimedOutAndExited { exit_code: code }
-        } else if protocol_error {
+        } else if output_state.provider_failed {
+            ProcessCompletion::ExitedWithFailure {
+                outcome: "provider-failed",
+                exit_code: code,
+                summary: final_summary,
+                error_code: "execution.provider-failed",
+            }
+        } else if output_state.protocol_error {
             ProcessCompletion::ExitedWithFailure {
                 outcome: "output-protocol-error",
                 exit_code: code,
@@ -1186,9 +1266,9 @@ impl Worker {
                 outcome: "failed",
                 exit_code: code,
                 summary: final_summary,
-                error_code: stderr_kind.error_code(),
+                error_code: stderr_error,
             }
-        } else if final_summary.is_none() {
+        } else if !output_state.protocol_complete || final_summary.is_none() {
             ProcessCompletion::ExitedWithFailure {
                 outcome: "missing-final-result",
                 exit_code: code,
@@ -1201,41 +1281,6 @@ impl Worker {
                 summary: final_summary.unwrap_or_default(),
             }
         }
-    }
-
-    fn store_output(
-        &self,
-        output: ClaudeOutput,
-        summary: &mut Option<String>,
-        protocol_error: &mut bool,
-    ) -> Result<(), &'static str> {
-        let (kind, text) = match output {
-            ClaudeOutput::TextDelta(text) => ("text", text),
-            ClaudeOutput::Final(text) => {
-                *summary = Some(text.clone());
-                ("final", text)
-            }
-            ClaudeOutput::ToolProgress(text) => ("progress", text.to_owned()),
-            ClaudeOutput::ProtocolError => {
-                *protocol_error = true;
-                (
-                    "protocol-error",
-                    "无法解析 Claude Code 输出事件，原始内容已丢弃".into(),
-                )
-            }
-            ClaudeOutput::Ignore => return Ok(()),
-        };
-        let event = self
-            .runtime
-            .store
-            .lock()
-            .map_err(|_| "storage.write-failed")?
-            .append_event(&self.run_id, kind, &text)
-            .map_err(|_| "storage.write-failed")?;
-        if let Some(event) = event {
-            (self.notify)(RuntimeNotification::Event(event));
-        }
-        Ok(())
     }
 }
 
@@ -1251,42 +1296,80 @@ fn failure(error_code: &'static str) -> ProcessCompletion {
 fn drain_outputs(
     runtime: &ExecutionRuntime,
     run_id: &str,
-    rx: &mpsc::Receiver<ClaudeOutput>,
+    rx: &mpsc::Receiver<ProviderOutput>,
     notify: &Arc<dyn Fn(RuntimeNotification) + Send + Sync>,
-    summary: &mut Option<String>,
-    protocol_error: &mut bool,
+    state: &mut OutputState,
 ) -> Result<(), &'static str> {
     while let Ok(output) = rx.try_recv() {
-        let (kind, text) = match output {
-            ClaudeOutput::TextDelta(text) => ("text", text),
-            ClaudeOutput::Final(text) => {
-                *summary = Some(text.clone());
-                ("final", text)
-            }
-            ClaudeOutput::ToolProgress(text) => ("progress", text.to_owned()),
-            ClaudeOutput::ProtocolError => {
-                *protocol_error = true;
-                (
-                    "protocol-error",
-                    "无法解析 Claude Code 输出事件，原始内容已丢弃".into(),
-                )
-            }
-            ClaudeOutput::Ignore => continue,
-        };
-        let event = runtime
-            .store
-            .lock()
-            .map_err(|_| "storage.write-failed")?
-            .append_event(run_id, kind, &text)
-            .map_err(|_| "storage.write-failed")?;
-        if let Some(event) = event {
-            notify(RuntimeNotification::Event(event));
-        }
+        store_output(runtime, run_id, output, notify, state)?;
     }
     Ok(())
 }
 
-fn read_stream<R: std::io::Read>(mut reader: R, tx: mpsc::SyncSender<ClaudeOutput>) {
+#[derive(Default)]
+struct OutputState {
+    summary: Option<String>,
+    protocol_complete: bool,
+    provider_failed: bool,
+    protocol_error: bool,
+}
+
+fn store_output(
+    runtime: &ExecutionRuntime,
+    run_id: &str,
+    output: ProviderOutput,
+    notify: &Arc<dyn Fn(RuntimeNotification) + Send + Sync>,
+    state: &mut OutputState,
+) -> Result<(), &'static str> {
+    let (kind, text) = match output {
+        ProviderOutput::TextDelta(text) => ("text", text),
+        ProviderOutput::Final(text) => {
+            state.summary = Some(text.clone());
+            ("final", text)
+        }
+        ProviderOutput::FinalAndComplete(text) => {
+            state.summary = Some(text.clone());
+            state.protocol_complete = true;
+            ("final", text)
+        }
+        ProviderOutput::ToolProgress(text) => ("progress", text.to_owned()),
+        ProviderOutput::ProtocolComplete => {
+            state.protocol_complete = true;
+            return Ok(());
+        }
+        ProviderOutput::ProtocolFailed => {
+            state.provider_failed = true;
+            (
+                "error",
+                "Provider 报告任务失败，原始错误内容已丢弃".to_owned(),
+            )
+        }
+        ProviderOutput::ProtocolError => {
+            state.protocol_error = true;
+            (
+                "protocol-error",
+                "无法解析 Provider 输出事件，原始内容已丢弃".to_owned(),
+            )
+        }
+        ProviderOutput::Ignore => return Ok(()),
+    };
+    let event = runtime
+        .store
+        .lock()
+        .map_err(|_| "storage.write-failed")?
+        .append_event(run_id, kind, &text)
+        .map_err(|_| "storage.write-failed")?;
+    if let Some(event) = event {
+        notify(RuntimeNotification::Event(event));
+    }
+    Ok(())
+}
+
+fn read_stream<R: std::io::Read>(
+    mut reader: R,
+    tx: mpsc::SyncSender<ProviderOutput>,
+    provider: Provider,
+) {
     let mut buffer = [0u8; 8192];
     let mut line = Vec::with_capacity(1024);
     let mut too_long = false;
@@ -1294,7 +1377,7 @@ fn read_stream<R: std::io::Read>(mut reader: R, tx: mpsc::SyncSender<ClaudeOutpu
         let count = match reader.read(&mut buffer) {
             Ok(0) => break,
             Err(_) => {
-                let _ = tx.send(ClaudeOutput::ProtocolError);
+                let _ = tx.send(ProviderOutput::ProtocolError);
                 return;
             }
             Ok(count) => count,
@@ -1302,9 +1385,9 @@ fn read_stream<R: std::io::Read>(mut reader: R, tx: mpsc::SyncSender<ClaudeOutpu
         for byte in &buffer[..count] {
             if *byte == b'\n' {
                 let event = if too_long {
-                    ClaudeOutput::ProtocolError
+                    ProviderOutput::ProtocolError
                 } else {
-                    vocamesh_agent::execution::parse_stream_json(&line)
+                    parse_provider_output(provider, &line)
                 };
                 if tx.send(event).is_err() {
                     return;
@@ -1320,9 +1403,9 @@ fn read_stream<R: std::io::Read>(mut reader: R, tx: mpsc::SyncSender<ClaudeOutpu
     }
     if !line.is_empty() {
         let output = if too_long {
-            ClaudeOutput::ProtocolError
+            ProviderOutput::ProtocolError
         } else {
-            vocamesh_agent::execution::parse_stream_json(&line)
+            parse_provider_output(provider, &line)
         };
         let _ = tx.send(output);
     }
@@ -1374,10 +1457,13 @@ fn terminate_process_tree(child: &mut Child, _pid: u32) -> bool {
 }
 
 fn validate_request(request: &ExecutionRequest) -> Result<(), ServiceError> {
-    if request.provider_id != Provider::Claude.id() {
+    if !matches!(
+        request.provider_id.parse::<Provider>(),
+        Ok(Provider::Claude | Provider::Codex)
+    ) {
         return Err(ServiceError::new(
             "execution.provider-not-supported",
-            "本阶段只支持 Claude Code 只读执行",
+            "当前只支持 Claude Code 和 Codex 的受控执行适配器",
         ));
     }
     if !request.consent {
@@ -1408,10 +1494,18 @@ fn valid_request_id(value: &str) -> bool {
 }
 
 fn not_ready(reason_code: &str, message: &str) -> ExecutionReadiness {
+    not_ready_with_auth(reason_code, message, AuthenticationState::Unknown)
+}
+
+fn not_ready_with_auth(
+    reason_code: &str,
+    message: &str,
+    auth_state: AuthenticationState,
+) -> ExecutionReadiness {
     ExecutionReadiness {
         ready: false,
         version: None,
-        auth_state: AuthenticationState::Unknown,
+        auth_state,
         message: message.into(),
         reason_code: Some(reason_code.into()),
     }
@@ -1482,7 +1576,51 @@ fn storage_write() -> ServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::process::Command;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    static FAKE_CLI_TEST_GATE: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    fn fake_cli_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        FAKE_CLI_TEST_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct FinalizeOnlyRunner;
+
+    impl ProviderRunner for FinalizeOnlyRunner {
+        fn provider(&self) -> Provider {
+            Provider::Claude
+        }
+
+        fn executable(&self) -> &std::path::Path {
+            std::path::Path::new("/unused")
+        }
+
+        fn version(&self) -> Option<String> {
+            None
+        }
+
+        fn probe(&self) -> Result<AuthenticationState, ServiceError> {
+            Ok(AuthenticationState::Unknown)
+        }
+
+        fn launch_command(&self, _prompt: &str, _working_directory: &std::path::Path) -> Command {
+            Command::new("/unused")
+        }
+
+        fn prompt_on_stdin(&self) -> bool {
+            false
+        }
+
+        fn classify_failure(&self, _stderr: &[u8]) -> &'static str {
+            "execution.cli-failed"
+        }
+    }
 
     fn request(id: &str) -> ExecutionRequest {
         ExecutionRequest {
@@ -1575,6 +1713,81 @@ esac
     }
 
     #[cfg(unix)]
+    fn fake_codex_runtime(root: &std::path::Path) -> ExecutionRuntime {
+        fake_codex_runtime_with_timeout(root, RUN_TIMEOUT)
+    }
+
+    #[cfg(unix)]
+    fn fake_codex_runtime_with_timeout(
+        root: &std::path::Path,
+        run_timeout: Duration,
+    ) -> ExecutionRuntime {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = root.join("config");
+        let data = root.join("data");
+        std::fs::create_dir_all(&config).unwrap();
+        let executable = root.join("codex");
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 0.162.1\n'
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  printf 'codex exec --json --sandbox read-only --ignore-user-config --ignore-rules --ephemeral --cd\n'
+  exit 0
+fi
+if [ "$1" = "exec" ]; then
+  prompt=$(cat)
+  case "$prompt" in
+    *slow*)
+      printf '{"type":"turn.started"}\n'
+      sleep 30
+      ;;
+    *failed*)
+      printf '{"type":"turn.failed","error":{"message":"synthetic failure"}}\n'
+      exit 0
+      ;;
+    *missing-completion*)
+      printf '{"type":"item.completed","item":{"type":"agent_message","text":"candidate only"}}\n'
+      exit 0
+      ;;
+  esac
+  printf '{"type":"thread.started","thread_id":"fixture-thread"}\n'
+  printf '{"type":"turn.started"}\n'
+  printf '{"type":"item.completed","item":{"type":"agent_message","text":"VOCAMESH synthetic marker"}}\n'
+  printf '{"type":"turn.completed"}\n'
+  exit 0
+fi
+exit 2
+"##,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        std::fs::write(
+            config.join("runtime-settings.json"),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "manualPaths": { "codex": executable },
+                "defaultToolId": null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        ExecutionRuntime::open_with_policy(
+            config,
+            data,
+            run_timeout,
+            ManagedPolicyStatus::TestCodexSafe,
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
     fn runtime_request(id: &str, workspace: &std::path::Path, prompt: &str) -> ExecutionRequest {
         ExecutionRequest {
             request_id: id.into(),
@@ -1596,6 +1809,27 @@ esac
             }
             assert!(Instant::now() < deadline, "fake Claude run did not finish");
             thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct ChunkedReader {
+        bytes: std::io::Cursor<Vec<u8>>,
+        max_chunk: usize,
+    }
+
+    impl ChunkedReader {
+        fn new(bytes: Vec<u8>, max_chunk: usize) -> Self {
+            Self {
+                bytes: std::io::Cursor::new(bytes),
+                max_chunk,
+            }
+        }
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = buffer.len().min(self.max_chunk);
+            self.bytes.read(&mut buffer[..count])
         }
     }
 
@@ -1667,8 +1901,7 @@ esac
             runtime: runtime.clone(),
             run_id: run_id.to_owned(),
             prompt: "synthetic test".into(),
-            executable: PathBuf::new(),
-            environment: ExecutionEnvironment::current(),
+            runner: Arc::new(FinalizeOnlyRunner),
             snapshot_path,
             stop_rx,
             notify: Arc::new(|_| {}),
@@ -1909,6 +2142,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn fake_claude_success_persists_output_and_duplicate_request_reuses_run() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         std::fs::write(workspace.path().join("README.md"), "safe input").unwrap();
@@ -1921,7 +2155,16 @@ esac
 
         let (task, run) = runtime.start_read_only_task(req.clone(), |_| {}).unwrap();
         let completed = wait_for_terminal(&runtime, &run.id);
-        let (same_task, same_run) = runtime.start_read_only_task(req, |_| {}).unwrap();
+        let (same_task, same_run) = runtime.start_read_only_task(req.clone(), |_| {}).unwrap();
+        let mut different_provider = req;
+        different_provider.provider_id = "codex".into();
+        assert_eq!(
+            runtime
+                .start_read_only_task(different_provider, |_| {})
+                .unwrap_err()
+                .code,
+            "execution.request-duplicate"
+        );
 
         assert_eq!(completed.outcome.as_deref(), Some("success"));
         assert_eq!(completed.summary.as_deref(), Some("fake result"));
@@ -1944,6 +2187,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn fake_claude_nonzero_exit_is_persisted_as_failure() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         let runtime = fake_runtime(root.path());
@@ -1965,6 +2209,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn fake_claude_stderr_is_classified_without_persisting_raw_content() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         let runtime = fake_runtime(root.path());
@@ -2001,6 +2246,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn orphaned_process_group_is_terminated_and_never_reported_as_success() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         let runtime = fake_runtime(root.path());
@@ -2146,6 +2392,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn fake_claude_timeout_is_persisted_as_failure() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         let runtime = fake_runtime_with_timeout(root.path(), Duration::from_millis(100));
@@ -2169,6 +2416,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn fake_claude_invalid_protocol_is_persisted_without_raw_output() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         let runtime = fake_runtime(root.path());
@@ -2184,15 +2432,13 @@ esac
 
         assert_eq!(failed.outcome.as_deref(), Some("output-protocol-error"));
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].text,
-            "无法解析 Claude Code 输出事件，原始内容已丢弃"
-        );
+        assert_eq!(events[0].text, "无法解析 Provider 输出事件，原始内容已丢弃");
     }
 
     #[cfg(unix)]
     #[test]
     fn fake_claude_stop_waits_for_child_process_tree_to_exit() {
+        let _fake_cli_guard = fake_cli_test_guard();
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
         let runtime = fake_runtime(root.path());
@@ -2279,9 +2525,11 @@ esac
     }
 
     #[test]
-    fn request_validation_rejects_provider_and_oversized_prompt() {
+    fn request_validation_accepts_codex_adapter_and_rejects_unsupported_provider() {
         let mut req = request("00000000-0000-4000-8000-000000000005");
         req.provider_id = "codex".into();
+        assert!(validate_request(&req).is_ok());
+        req.provider_id = "opencode".into();
         assert_eq!(
             validate_request(&req).unwrap_err().code,
             "execution.provider-not-supported"
@@ -2291,6 +2539,150 @@ esac
         assert_eq!(
             validate_request(&req).unwrap_err().code,
             "execution.invalid-request"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_fake_cli_uses_the_shared_task_run_event_lifecycle() {
+        let _fake_cli_guard = fake_cli_test_guard();
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("README.md"),
+            "Synthetic acceptance fixture: VOCAMESH synthetic marker.",
+        )
+        .unwrap();
+        let runtime = fake_codex_runtime(directory.path());
+        let mut request = runtime_request(
+            "00000000-0000-4000-8000-000000000006",
+            &workspace,
+            "Read the synthetic README",
+        );
+        request.provider_id = "codex".into();
+
+        let (task, pending) = runtime
+            .start_read_only_task(request, |_| {})
+            .expect("test-only Codex policy permits the synthetic fixture");
+        let finished = wait_for_terminal(&runtime, &pending.id);
+        assert_eq!(task.provider_id, "codex");
+        assert_eq!(finished.provider_id, "codex");
+        assert_eq!(finished.state, RunState::Finished);
+        assert_eq!(finished.outcome.as_deref(), Some("success"));
+        assert_eq!(
+            finished.summary.as_deref(),
+            Some("VOCAMESH synthetic marker")
+        );
+        let events = runtime.list_run_events(&finished.id, 0, 100).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| { event.kind == "final" && event.text == "VOCAMESH synthetic marker" }));
+        assert!(!events
+            .iter()
+            .any(|event| event.text.contains("thread.started")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_protocol_failure_and_missing_completion_cannot_be_success() {
+        let _fake_cli_guard = fake_cli_test_guard();
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runtime = fake_codex_runtime(directory.path());
+
+        for (request_id, prompt, outcome, reason) in [
+            (
+                "00000000-0000-4000-8000-000000000008",
+                "synthetic failed response",
+                "provider-failed",
+                "execution.provider-failed",
+            ),
+            (
+                "00000000-0000-4000-8000-000000000009",
+                "synthetic missing-completion response",
+                "missing-final-result",
+                "run.output-protocol-error",
+            ),
+        ] {
+            let mut request = runtime_request(request_id, &workspace, prompt);
+            request.provider_id = "codex".into();
+            let (_, pending) = runtime.start_read_only_task(request, |_| {}).unwrap();
+            let finished = wait_for_terminal(&runtime, &pending.id);
+            assert_eq!(finished.state, RunState::Crashed);
+            assert_eq!(finished.outcome.as_deref(), Some(outcome));
+            assert_eq!(finished.error_code.as_deref(), Some(reason));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_fake_cli_uses_shared_stop_and_timeout_supervision() {
+        let _fake_cli_guard = fake_cli_test_guard();
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runtime = fake_codex_runtime(directory.path());
+        let mut request = runtime_request(
+            "00000000-0000-4000-8000-000000000010",
+            &workspace,
+            "slow synthetic fixture",
+        );
+        request.provider_id = "codex".into();
+        let (_, pending) = runtime.start_read_only_task(request, |_| {}).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.get_run(&pending.id).unwrap().state != RunState::Running {
+            assert!(
+                Instant::now() < deadline,
+                "fake Codex process did not start"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let stop_requested = runtime.stop_run(&pending.id, |_| {}).unwrap();
+        let stopped = wait_for_terminal(&runtime, &pending.id);
+        assert_eq!(stop_requested.state, RunState::StopRequested);
+        assert_eq!(stopped.outcome.as_deref(), Some("stopped"));
+
+        let timeout_directory = tempdir().unwrap();
+        let timeout_workspace = timeout_directory.path().join("workspace");
+        std::fs::create_dir_all(&timeout_workspace).unwrap();
+        let timeout_runtime =
+            fake_codex_runtime_with_timeout(timeout_directory.path(), Duration::from_millis(100));
+        let mut timeout_request = runtime_request(
+            "00000000-0000-4000-8000-000000000011",
+            &timeout_workspace,
+            "slow synthetic fixture",
+        );
+        timeout_request.provider_id = "codex".into();
+        let (_, pending) = timeout_runtime
+            .start_read_only_task(timeout_request, |_| {})
+            .unwrap();
+        let timed_out = wait_for_terminal(&timeout_runtime, &pending.id);
+        assert_eq!(timed_out.outcome.as_deref(), Some("timeout"));
+        assert_eq!(timed_out.error_code.as_deref(), Some("run.timeout"));
+    }
+
+    #[test]
+    fn production_codex_policy_blocks_before_creating_a_run() {
+        let directory = tempdir().unwrap();
+        let runtime = ExecutionRuntime::open(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        )
+        .unwrap();
+        let mut request = request("00000000-0000-4000-8000-000000000007");
+        request.provider_id = "codex".into();
+
+        let error = runtime.start_read_only_task(request, |_| {}).unwrap_err();
+        assert_eq!(error.code, "execution.codex-safety-unverified");
+        assert!(runtime.list_tasks().unwrap().is_empty());
+        let readiness = runtime.readiness_for(Provider::Codex);
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness.reason_code.as_deref(),
+            Some("execution.codex-safety-unverified")
         );
     }
 
@@ -2314,8 +2706,32 @@ esac
         read_stream(
             std::io::Cursor::new(br#"{"type":"result","result":"done"}"#.to_vec()),
             tx,
+            Provider::Claude,
         );
-        assert_eq!(rx.recv().unwrap(), ClaudeOutput::Final("done".into()));
+        assert_eq!(
+            rx.recv().unwrap(),
+            ProviderOutput::FinalAndComplete("done".into())
+        );
+    }
+
+    #[test]
+    fn stream_reader_handles_fragmented_eof_non_utf8_and_oversized_lines() {
+        let fixture = br#"{"type":"turn.completed"}"#.to_vec();
+        let (tx, rx) = mpsc::sync_channel(2);
+        read_stream(ChunkedReader::new(fixture, 3), tx, Provider::Codex);
+        assert_eq!(rx.recv().unwrap(), ProviderOutput::ProtocolComplete);
+
+        let (tx, rx) = mpsc::sync_channel(2);
+        read_stream(std::io::Cursor::new(vec![0xff, b'\n']), tx, Provider::Codex);
+        assert_eq!(rx.recv().unwrap(), ProviderOutput::ProtocolError);
+
+        let (tx, rx) = mpsc::sync_channel(2);
+        read_stream(
+            std::io::Cursor::new(vec![b'x'; STREAM_LINE_LIMIT + 1]),
+            tx,
+            Provider::Codex,
+        );
+        assert_eq!(rx.recv().unwrap(), ProviderOutput::ProtocolError);
     }
 
     #[test]
