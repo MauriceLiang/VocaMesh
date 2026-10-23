@@ -1,5 +1,13 @@
 # 安全边界
 
+## v0.5 本机工具发现边界
+
+本机 CLI 发现只检查进程 `PATH` 和固定的 macOS 标准目录，不读取 Shell profile、不递归扫描 Home、不访问认证配置或凭据文件。每个候选必须与 Provider 的可执行文件名匹配；手动路径还必须是绝对路径、普通文件且可执行。常见 symlink 保留用于展示的输入路径，并单独校验 canonical 目标。版本探测仅直接启动所选二进制并传入固定 `--version`，不经 Shell；超时、输出大小和错误返回均受限制。
+
+发现、版本、认证、适配器能力和 Runtime readiness 是独立字段。已发现或已认证都不会授权执行；只有 Runtime readiness 可控制任务入口，且 `execution.managed-policy-unverified` 仍在生产默认值与启动入口生效。Codex/OpenCode 的认证探测未建立，因此界面明确显示 unsupported/unknown。浏览器 Mock 不覆盖 Tauri 本机状态。
+
+依据官方 CLI 文档的认证命令没有符合 VocaMesh 机器可读与凭据最小访问要求的稳定契约，本阶段不调用这些命令，不读取凭据内容，也不以模型请求验证登录状态。具体调研依据和待决路线记录在 [ADR 0001](adr/0001-agent-execution-boundary.md) 与实现报告中。
+
 ## 当前真实执行门禁
 
 桌面端真实执行目前保持 fail-closed。`--restricted` 会加载 Claude Code 的 managed settings 与本次 `--settings`；`--safe-mode` 会关闭常规自定义项，但官方 CLI 文档明确说明 managed policy hooks 仍可运行。Hooks 可执行 Shell 命令。组织策略既可能来自设备文件/MDM，也可能通过 Claude 管理端下发；本机没有受支持的非交互查询可证明这些策略不存在或无副作用。

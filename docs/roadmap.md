@@ -39,3 +39,11 @@
 桌面页面现在以真实 Catalog 显示 Agent、Workspace、Team 与关系，审批/通知保持空状态，设置仅持久化支持的外观字段。Agent/Workspace 权限只保存为未激活配置，`ManagedPolicyStatus::Unverified` 与 `execution.managed-policy-unverified` 执行门禁未放宽；本阶段没有启动 CLI 或真实模型任务，也未恢复 GitHub Actions。
 
 本轮 `./scripts/verify-local.sh` 退出码 0：Rust workspace 73 项测试（Agent 25、Core 2、Runtime 46），前端 11 个文件/41 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查均 PASS。Tauri 编译包含在 workspace check 中。macOS 原生 GUI 因缺少完整 Xcode / 可验收窗口标记 BLOCKED；Windows、Linux、Playwright E2E 未验收。详细限制及逐项 GUI 清单见 `implementation-report.md` 与 `v0.4-gui-acceptance.md`。本地构建和自动化不能替代重启后的原生桌面验收，也不代表多 Agent 执行已实现。
+
+## v0.5 本机 Agent 工具接入
+
+`feature/v0.5-local-agent-integration` 基于 `origin/main` 的 `77d4bb22ac9e6fca8fe6c58e5e0a8e2c8d2a23e2`。建立 Provider 能力表及结构化发现/版本/认证/适配器/Runtime 状态；扩展有限 PATH 与 macOS 标准候选目录、规范化路径和 Provider 文件名校验；保存偏好不再依赖 readiness。Claude 认证探测复用既有安全实现，Codex/OpenCode 保持认证未知/不支持。Tauri 扫描、验证及路径保存均读取 Runtime readiness；浏览器 Mock 独立，schema v3 与 `execution.managed-policy-unverified` 未改变。
+
+`./scripts/verify-local.sh` 退出码 0：Rust workspace 88 项测试（Agent 37、Core 3、Tauri 2、Runtime 46）、前端 11 个文件/44 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查全部 PASS。本阶段没有运行任何认证状态命令或真实模型请求。macOS GUI 因缺少完整 Xcode/可验收窗口为 BLOCKED；Windows、Linux、Playwright E2E 和远端 CI 为 NOT RUN。逐项证据与当前分支提交/PR 状态见 `implementation-report.md`。
+
+`pnpm --dir frontend tauri build --bundles app --no-sign` 另行成功生成 macOS `.app` bundle；跳过代码签名，且没有启动窗口，因此不改变 GUI BLOCKED 状态。

@@ -6,7 +6,7 @@ import VocaButton from "@/components/ui/VocaButton.vue";
 import VocaStatus from "@/components/ui/VocaStatus.vue";
 import { useAppStore } from "@/stores/app";
 import { useToolsStore } from "@/stores/tools";
-import { toolStateMeta } from "@/lib/status";
+import { toolAuthMeta, toolDiscoveryMeta, toolStateMeta, toolVersionMeta } from "@/lib/status";
 import { useServices } from "@/services/adapters";
 
 const app = useAppStore();
@@ -73,14 +73,15 @@ async function start(): Promise<void> {
               <span class="flex min-w-0 flex-1 flex-col gap-[1px]">
                 <span class="flex items-center gap-[7px]"><b class="text-[12.5px] font-medium">{{ tool.name }}</b><span class="v-mono v-tiny v-muted">{{ tool.version }}</span></span>
                 <span class="v-mono v-tiny v-muted">{{ tool.path }}</span>
+                  <span v-if="!mockPreview" class="v-tiny v-muted">{{ toolVersionMeta(tool.versionStatus).label }} · {{ toolAuthMeta(tool.authState).label }}</span>
               </span>
-              <VocaStatus :meta="toolStateMeta(tool.state)" />
+              <VocaStatus :meta="mockPreview ? toolStateMeta(tool.state) : toolDiscoveryMeta(tool.discoveryStatus)" />
             </div>
           </div>
         </div>
 
         <p class="v-tiny v-muted" :style="{ margin: 0, lineHeight: 1.6 }">
-          检测只读取可执行文件路径、版本与登录状态提示，不读取任何凭据内容；状态不明时显示“认证待验证”，不会假定可用。
+          检测只显示可执行文件、版本、认证探测能力和 Runtime 状态，不读取凭据内容；状态彼此独立，不会从“已发现”推断“可执行”。
         </p>
 
         <div class="flex items-center gap-2">

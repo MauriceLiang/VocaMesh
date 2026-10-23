@@ -7,7 +7,9 @@ pub mod events;
 pub mod execution;
 
 pub use agent::{
-    now_unix_millis, AuthenticationState, LocalTool, Provider, ToolRuntime, ToolSource, ToolState,
+    derive_tool_state, now_unix_millis, AuthenticationState, LocalTool, Provider,
+    ProviderCapabilities, ToolDiscoveryStatus, ToolIntegrationStatus, ToolRuntime, ToolSource,
+    ToolState, ToolVersionStatus,
 };
 pub use catalog::{
     AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings, CatalogStatus,

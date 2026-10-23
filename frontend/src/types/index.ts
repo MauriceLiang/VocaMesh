@@ -49,6 +49,22 @@ export type SubtaskState =
 export type ToolState = "ready" | "pending" | "auth-required" | "missing" | "incompatible" | "undetectable";
 export type ToolAuthState = "authenticated" | "unauthenticated" | "unknown" | "unsupported";
 export type ToolSource = "path" | "standard-location" | "manual";
+export type ToolDiscoveryStatus = "missing" | "found" | "path-invalid" | "probe-failed";
+export type ToolVersionStatus = "known" | "unknown" | "incompatible";
+export type ToolIntegrationStatus = "discovery-only" | "adapter-available" | "unsupported-platform" | "blocked-by-policy";
+
+export interface ProviderCapabilities {
+  providerId: string;
+  displayName: string;
+  executableName: string;
+  adapter: string;
+  discoverySupported: boolean;
+  versionProbeSupported: boolean;
+  executionAdapterAvailable: boolean;
+  authenticationProbeSupported: boolean;
+  minimumVersion: string | null;
+  unsupportedReasonCode: string | null;
+}
 
 /** Run（执行尝试）状态。不可覆盖：重试产生新 Run。 */
 export type RunState = "pending" | "starting" | "running" | "waiting-input" | "stop-requested" | "stopped" | "finished" | "crashed" | "unknown";
@@ -113,14 +129,23 @@ export interface LocalTool {
   version: string;
   /** 可执行文件路径；未检测到时为 "未检测到"。 */
   path: string;
+  /** 规范化后的目标路径；展示给用户的 path 保留所选 symlink。 */
+  canonicalPath: string | null;
   state: ToolState;
   /** 面向用户的解释（为什么是这个状态、下一步做什么）。 */
   note: string;
   /** 认证和安装状态分开；未知或不支持不会映射为 ready。 */
-  authState?: ToolAuthState;
+  authState: ToolAuthState;
+  discoveryStatus: ToolDiscoveryStatus;
+  versionStatus: ToolVersionStatus;
+  integrationStatus: ToolIntegrationStatus;
+  reasonCode: string | null;
+  runtimeReady: boolean;
+  runtimeReasonCode: string | null;
+  capabilities: ProviderCapabilities;
   /** Unix epoch milliseconds. */
-  detectedAt?: number;
-  source?: ToolSource;
+  lastCheckedAt: number;
+  source: ToolSource | null;
 }
 
 export interface TeamMember {

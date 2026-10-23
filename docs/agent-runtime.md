@@ -1,5 +1,17 @@
 # 本机 Agent CLI 运行时
 
+## v0.5 本机工具发现与能力状态
+
+Rust Core 的 Provider 能力表是 Claude Code、Codex CLI、OpenCode 的单一能力来源：包含 Provider ID、显示名、可执行文件名、发现/版本探测能力、VocaMesh 执行适配器、认证探测能力、可证明的最低版本和稳定阻断原因。Claude Code 的最低版本为 `2.1.259`；Codex/OpenCode 只报告实际解析到的版本，不据此推断兼容执行。当前只有 Claude Code 有适配器。
+
+`LocalTool` 将发现、版本、认证、集成能力和 Runtime readiness 分开序列化。路径无效、探测失败、版本未知/不兼容、认证未知/未登录、适配器缺失和策略阻断分别通过枚举及 `reasonCode` 表达。`note` 仅用于界面文案。字段不持久化，因此不修改 SQLite schema v3。Agent 发现层不推断全局执行策略；Tauri 在扫描、验证及保存路径响应中叠加 `ExecutionRuntime::readiness()`。
+
+发现按进程 `PATH` 顺序优先，再按固定顺序检查 macOS `/opt/homebrew/bin`、`/usr/local/bin`、Home 下已有的 `.local/bin`、`.bun/bin`，以及 `.cargo/bin`、`.volta/bin`、`.asdf/shims`、`.local/share/mise/shims`、`.npm-global/bin`。不运行 Shell、读取 Shell 配置或递归扫描 Home。候选目录规范化后去重；结果保留展示路径和 canonical 目标路径。手动路径必须为 Provider 文件名匹配的绝对可执行普通文件；保存只验证路径，不启动程序，之后重新检测才会直接启动该程序并传入固定 `--version`。版本/认证输出均有上限、超时和固定错误码，不记录原始输出。Windows `.cmd`/`.bat` shim 继续安全拒绝。
+
+工具页的“设为偏好”仅保存偏好：扫描或 Runtime 阻断不会清除此值；只有具有执行适配器、路径已发现且版本已解析的 Provider 可设为偏好。偏好不等于授权。任务入口仍只由 Runtime readiness 控制，并在 Rust 启动入口复查。Tauri 的缺失时间和来源不冒充演示数据，IPC 错误不回退到 Mock；浏览器 Mock 继续独立运行。
+
+认证探测复用 `ClaudeCli` 的固定 `claude auth status`、清理后环境、stdout 上限和严格 JSON/退出码解析。只有退出码与 allowlist 字段组合明确时才判已认证或未认证；未知输出保持未知，超时和一般探测失败使用不同稳定原因码。认证成功不会改变 `execution.managed-policy-unverified`。Codex/OpenCode 的认证状态保持 unsupported/unknown，不运行登录态命令、不读配置/凭据、不发起模型请求。官方契约与理由见 ADR 0001 v0.5 补充证据。
+
 ## 支持范围与安全就绪状态
 
 只有 Claude Code 有单 Agent Runtime 实现。Codex/OpenCode 仍可发现，但不能执行。Windows 真实执行固定关闭。当前 Unix/macOS readiness 也因 managed hooks 策略无法可靠核实而 fail-closed；用户界面和后端任务入口都会拒绝启动。受限参数和 fake CLI 测试不等于真实执行安全门禁通过。

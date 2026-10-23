@@ -1510,7 +1510,7 @@ mod tests {
         let config = root.join("config");
         let data = root.join("data");
         std::fs::create_dir_all(&config).unwrap();
-        let executable = root.join("fake-claude");
+        let executable = root.join("claude");
         std::fs::write(
             &executable,
             r##"#!/bin/sh

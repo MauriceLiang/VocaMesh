@@ -83,12 +83,53 @@ export const seedAgents = (): Agent[] => [
   },
 ];
 
-export const seedTools = (): LocalTool[] => [
-  { id: "claude", name: "Claude Code", adapter: "claude-code", version: "v2.1.4", path: "/usr/local/bin/claude", state: "ready", note: "已验证登录 · 3 个角色在用" },
-  { id: "codex", name: "Codex CLI", adapter: "codex-cli", version: "v0.9.2", path: "/opt/homebrew/bin/codex", state: "auth-required", note: "检测到配置文件，但无法确认登录状态" },
-  { id: "opencode", name: "OpenCode", adapter: "opencode", version: "—", path: "未检测到", state: "missing", note: "需要手动安装后才能被角色使用" },
-  { id: "omni", name: "Omni Adapter", adapter: "omni", version: "v1.2.0", path: "~/.local/bin/omni", state: "undetectable", note: "版本读取超时，可能不兼容当前系统" },
-];
+export const seedTools = (): LocalTool[] => {
+  const capabilities = (
+    providerId: string,
+    displayName: string,
+    executableName: string,
+    adapter: string,
+    adapterAvailable: boolean,
+    authProbe: boolean,
+    minimumVersion: string | null,
+    unsupportedReasonCode: string | null,
+  ) => ({
+    providerId, displayName, executableName, adapter,
+    discoverySupported: true,
+    versionProbeSupported: true,
+    executionAdapterAvailable: adapterAvailable,
+    authenticationProbeSupported: authProbe,
+    minimumVersion,
+    unsupportedReasonCode,
+  });
+  const now = Date.now();
+  return [
+    {
+      id: "claude", name: "Claude Code", adapter: "claude-code", version: "2.1.296", path: "/usr/local/bin/claude",
+      canonicalPath: "/usr/local/bin/claude", state: "ready", note: "Mock：已验证登录 · 3 个角色在用", authState: "authenticated",
+      discoveryStatus: "found", versionStatus: "known", integrationStatus: "adapter-available", reasonCode: null,
+      runtimeReady: true, runtimeReasonCode: null, capabilities: capabilities("claude", "Claude Code", "claude", "claude-code", true, true, "2.1.259", null), lastCheckedAt: now, source: "path",
+    },
+    {
+      id: "codex", name: "Codex CLI", adapter: "codex-cli", version: "0.9.2", path: "/opt/homebrew/bin/codex",
+      canonicalPath: "/opt/homebrew/bin/codex", state: "undetectable", note: "Mock：已发现；本阶段没有执行适配器", authState: "unsupported",
+      discoveryStatus: "found", versionStatus: "known", integrationStatus: "discovery-only", reasonCode: "tool.adapter-unavailable",
+      runtimeReady: false, runtimeReasonCode: "tool.adapter-unavailable", capabilities: capabilities("codex", "Codex CLI", "codex", "codex-cli", false, false, null, "tool.adapter-unavailable"), lastCheckedAt: now, source: "path",
+    },
+    {
+      id: "opencode", name: "OpenCode", adapter: "opencode", version: "—", path: "未检测到",
+      canonicalPath: null, state: "missing", note: "Mock：没有找到 OpenCode CLI", authState: "unsupported",
+      discoveryStatus: "missing", versionStatus: "unknown", integrationStatus: "discovery-only", reasonCode: "tool.not-found",
+      runtimeReady: false, runtimeReasonCode: "tool.adapter-unavailable", capabilities: capabilities("opencode", "OpenCode", "opencode", "opencode", false, false, null, "tool.adapter-unavailable"), lastCheckedAt: now, source: null,
+    },
+    {
+      id: "omni", name: "Omni Adapter", adapter: "omni", version: "1.2.0", path: "~/.local/bin/omni",
+      canonicalPath: null, state: "undetectable", note: "Mock：版本读取超时", authState: "unsupported",
+      discoveryStatus: "probe-failed", versionStatus: "unknown", integrationStatus: "discovery-only", reasonCode: "tool.probe-timeout",
+      runtimeReady: false, runtimeReasonCode: "tool.adapter-unavailable", capabilities: capabilities("omni", "Omni Adapter", "omni", "omni", false, false, null, "tool.adapter-unavailable"), lastCheckedAt: now, source: null,
+    },
+  ];
+};
 
 export const seedTeams = (): Team[] => [
   {

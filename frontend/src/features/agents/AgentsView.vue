@@ -14,7 +14,12 @@ import { useToolsStore } from "@/stores/tools";
 import { agentStateMeta } from "@/lib/status";
 import type { AgentPermissions } from "@/types";
 import { useServices } from "@/services/adapters";
-import { toolStateMeta } from "@/lib/status";
+import {
+  toolAuthMeta,
+  toolDiscoveryMeta,
+  toolIntegrationMeta,
+  toolVersionMeta,
+} from "@/lib/status";
 
 const agents = useAgentsStore();
 const tools = useToolsStore();
@@ -42,7 +47,10 @@ const supportedProviders = [
 const toolItems = computed(() => isNative
   ? supportedProviders.map((provider) => {
       const tool = tools.tools.find((item) => item.id === provider.id);
-      return { value: provider.id, label: `${provider.name}（${tool ? toolStateMeta(tool.state).label : "未检测到本机 CLI"}）` };
+      const status = tool
+        ? `${toolDiscoveryMeta(tool.discoveryStatus).label} · ${toolVersionMeta(tool.versionStatus).label} · ${toolAuthMeta(tool.authState).label} · ${toolIntegrationMeta(tool.integrationStatus).label}`
+        : "尚未检测";
+      return { value: provider.id, label: `${provider.name}（${status}）` };
     })
   : tools.tools.map((tool) => ({ value: tool.id, label: `${tool.name}（${tool.state === "ready" ? "可用" : "需登录/未就绪"}）` })));
 
