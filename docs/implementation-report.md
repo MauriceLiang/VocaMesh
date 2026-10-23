@@ -26,6 +26,8 @@
 | `pnpm --dir frontend build` | PASS，Vite production build 完成 |
 | `git diff --check` | PASS |
 
+另行执行 `pnpm --dir frontend tauri build --bundles app --no-sign`：PASS，生成 arm64 macOS bundle `target/release/bundle/macos/VocaMesh.app`，14.63 MiB。构建跳过代码签名，未启动窗口。
+
 ## 原生、平台与真实任务验收
 
 - **macOS GUI：BLOCKED。** Computer Use 未获准访问 VocaMesh，因此无法启动并操作可验收的原生窗口。本轮不把构建/typecheck/unit tests 当作 GUI 验收。
