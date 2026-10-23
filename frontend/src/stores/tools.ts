@@ -19,10 +19,19 @@ export const useToolsStore = defineStore("tools", () => {
   let scanRevision = 0;
 
   const counts = computed(() => ({
-    ready: tools.value.filter((tool) => tool.state === "ready").length,
-    authRequired: tools.value.filter((tool) => tool.state === "auth-required").length,
-    missing: tools.value.filter((tool) => tool.state === "missing").length,
-    undetectable: tools.value.filter((tool) => tool.state === "undetectable").length,
+    discovered: tools.value.filter((tool) => tool.discoveryStatus === "found").length,
+    authPending: tools.value.filter((tool) =>
+      tool.discoveryStatus === "found"
+        && tool.capabilities.authenticationProbeSupported
+        && tool.authState !== "authenticated",
+    ).length,
+    missing: tools.value.filter((tool) => tool.discoveryStatus === "missing").length,
+    executionRestricted: tools.value.filter((tool) =>
+      !tool.capabilities.executionAdapterAvailable
+        || !tool.runtimeReady
+        || tool.authState !== "authenticated"
+        || tool.versionStatus !== "known",
+    ).length,
   }));
 
   async function load(): Promise<void> {
@@ -65,9 +74,10 @@ export const useToolsStore = defineStore("tools", () => {
     try {
       const tool = await services.tools.verifyTool(id);
       tools.value = tools.value.map((item) => (item.id === tool.id ? tool : item));
+      const ready = tool.runtimeReady && tool.authState === "authenticated";
       app.toast(
-        tool.state === "ready" ? `已验证：${tool.name} 可用` : `${tool.name} 尚未通过可用性验证`,
-        tool.state === "ready" ? "success" : "blocked",
+        ready ? `已验证：${tool.name} 可用于执行` : `${tool.name} 已完成探测，但执行条件尚未满足`,
+        ready ? "success" : "blocked",
       );
     } catch (err) {
       app.toast(err instanceof ServiceError ? err.message : "工具验证失败", "failure");
@@ -88,17 +98,23 @@ export const useToolsStore = defineStore("tools", () => {
 
   async function setDefault(id: string): Promise<void> {
     const tool = tools.value.find((item) => item.id === id);
-    if (!tool || tool.state !== "ready") {
-      app.toast("只有已验证可用的工具才能设为默认", "blocked");
+    if (!tool || !canSetPreference(tool)) {
+      app.toast("只有已发现、版本有效且具有执行适配器的工具才能设为偏好", "blocked");
       return;
     }
     try {
       await services.tools.setDefaultTool(id);
       defaultToolId.value = id;
-      app.toast("已设为默认执行工具", "success");
+      app.toast("已设为偏好工具；执行仍需通过 Runtime 检查", "success");
     } catch (err) {
       app.toast(err instanceof ServiceError ? err.message : "默认工具设置失败", "failure");
     }
+  }
+
+  function canSetPreference(tool: LocalTool): boolean {
+    return tool.capabilities.executionAdapterAvailable
+      && tool.discoveryStatus === "found"
+      && tool.versionStatus === "known";
   }
 
   return {
@@ -116,5 +132,6 @@ export const useToolsStore = defineStore("tools", () => {
     verify,
     setPath,
     setDefault,
+    canSetPreference,
   };
 });

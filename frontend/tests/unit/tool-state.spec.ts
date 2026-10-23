@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { toolStateMeta } from "@/lib/status";
-import type { ToolState } from "@/types";
+import {
+  toolAuthMeta,
+  toolDiscoveryMeta,
+  toolIntegrationMeta,
+  toolRuntimeMeta,
+  toolStateMeta,
+  toolVersionMeta,
+} from "@/lib/status";
+import type {
+  ToolAuthState,
+  ToolDiscoveryStatus,
+  ToolIntegrationStatus,
+  ToolState,
+  ToolVersionStatus,
+} from "@/types";
 
 describe("tool status labels", () => {
   it("maps every runtime state to explicit UI text", () => {
@@ -13,5 +26,19 @@ describe("tool status labels", () => {
       "不兼容",
       "无法检测",
     ]);
+  });
+
+  it("maps discovery, version, auth, adapter, and Runtime states independently", () => {
+    const discovery: ToolDiscoveryStatus[] = ["missing", "found", "path-invalid", "probe-failed"];
+    const versions: ToolVersionStatus[] = ["known", "unknown", "incompatible"];
+    const auth: ToolAuthState[] = ["authenticated", "unauthenticated", "unknown", "unsupported"];
+    const integrations: ToolIntegrationStatus[] = ["discovery-only", "adapter-available", "unsupported-platform", "blocked-by-policy"];
+
+    expect(discovery.map((state) => toolDiscoveryMeta(state).label)).toEqual(["未找到", "已发现", "路径无效", "探测失败"]);
+    expect(versions.map((state) => toolVersionMeta(state).label)).toEqual(["版本已知", "版本未知", "版本不兼容"]);
+    expect(auth.map((state) => toolAuthMeta(state).label)).toEqual(["已登录", "未登录", "登录状态未知", "未支持认证探测"]);
+    expect(integrations.map((state) => toolIntegrationMeta(state).label)).toEqual(["仅支持发现", "执行适配器可用", "平台不支持", "策略阻断"]);
+    expect(toolRuntimeMeta(false, "execution.managed-policy-unverified").label).toBe("Runtime 被策略阻断");
+    expect(toolRuntimeMeta(false, "tool.adapter-unavailable").label).toBe("无执行适配器");
   });
 });

@@ -32,7 +32,7 @@ export function createTauriToolService(): ToolService {
     verifyTool: (id) => call<LocalTool>("verify_tool", { id }, "tool.version-unavailable", "工具验证失败"),
     setToolPath: (id, path) => call<LocalTool>("set_tool_path", { id, path }, "tool.invalid-path", "无法保存工具路径"),
     setDefaultTool: async (id) => {
-      await call<void>("set_default_tool", { id }, "tool.not-ready", "工具尚未通过可用性验证");
+      await call<void>("set_default_tool", { id }, "tool.adapter-unavailable", "该工具当前没有执行适配器");
     },
     getDefaultToolId: () => call<string | null>("get_default_tool_id", undefined, "settings.read-failed", "默认工具设置无法读取"),
   };

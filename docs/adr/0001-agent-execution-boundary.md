@@ -39,3 +39,23 @@ v0.3.1 的恢复 UI 只解决已存在 Unknown Run 的状态核验、人工确�
 - 当前真实 Claude Code 任务继续被 `execution.managed-policy-unverified` 阻断，v0.3 真实执行验收仍未完成。
 - v0.3.1 可以安全检查和恢复历史 Unknown Run，但不会改变真实执行能力。
 - 在维护者明确批准方案 B 或 C，或提供方给出足够的方案 A 证据之前，不启动新执行后端、不开放真实任务、不开始多 Agent 并行或写权限阶段。
+
+## v0.5 本机发现补充证据与待决事项
+
+本阶段只补充本地 CLI 发现和能力表达，没有改变上述执行决策。Claude Code 的安全策略仍无法由 VocaMesh 可靠核验，所以认证探测成功、偏好保存和本地版本发现均不会解除 `execution.managed-policy-unverified`。
+
+Codex CLI 官方文档说明 `codex login status` 输出当前认证模式并以退出码表示是否存在凭据，但没有定义机器可读字段契约；CLI 实现会通过认证管理器读取凭据状态，部分认证方式会读取并打印掩码后的 API key。VocaMesh 不运行该命令，也不读取其输出。OpenCode v1 CLI 文档将 `opencode auth list` 描述为列出存储的 Provider；v2 文档另外说明 `--format json`。审查到的 v2 实现会连接 OpenCode server、先请求模型 readiness，再读取 integration connections，并输出 Provider 名称与 credential/environment 来源标签；这些连接会涉及服务器配置的项目目录/环境范围，不能作为 VocaMesh 所需的本地、隔离、可版本约束认证探测。VocaMesh 因而不运行该命令，不读取配置/凭据内容，也不把登录状态标成已验证。依据（查阅日期：2026-10-23）：[Codex CLI reference](https://developers.openai.com/codex/cli/reference)、[Codex login implementation](https://github.com/openai/codex/blob/main/codex-rs/cli/src/login.rs)、[OpenCode v1 CLI](https://dev.opencode.ai/docs/cli/)、[OpenCode v2 CLI](https://opencode.ai/v2/docs/cli/commands)、[OpenCode auth list implementation](https://github.com/anomalyco/opencode/blob/4d30794bcf4dccdcadbcb1f62bb35b4943a96426/packages/cli/src/commands/handlers/auth/list.ts)、[OpenCode auth command helper](https://github.com/anomalyco/opencode/blob/4d30794bcf4dccdcadbcb1f62bb35b4943a96426/packages/cli/src/commands/handlers/auth/shared.ts)。
+
+后续路线需要维护者基于完整责任面决策；本阶段不替维护者选择或实施 B/C：
+
+| 维度 | A. 继续等待 CLI 可核验边界 | B. 直接 API Provider | C. CLI 置于 OS 沙箱/VM |
+| --- | --- | --- | --- |
+| Provider 范围 | 继续 Claude Code CLI；等待提供方可验证策略/Hook 边界 | 需选定 API 模型/Provider，并实现受控工具协议 | 继续 CLI，但另行定义沙箱支持的 Provider 与版本 |
+| 凭据与费用 | 沿用用户 CLI 账户；费用由 CLI 计划和提供方决定 | 用户另配 API 凭据；可能产生 CLI 订阅外的 API 费用 | 仍需把 CLI 凭据放入可访问环境；另有 VM/沙箱资源成本 |
+| Prompt、文件与日志数据流 | CLI 及其托管策略控制网络行为；VocaMesh 的只读快照和日志边界继续生效 | Prompt/允许读取的文件经 VocaMesh 的 API 传输层发给 Provider，需定义请求/响应/日志保留 | CLI 在受限文件系统中访问快照；仍需验证凭据、输出与网络出口 |
+| 网络策略 | 当前不能证明 Hooks 或 CLI 的完整网络边界 | 需明确出口域名、代理、重试与遥测策略 | 需验证操作系统网络隔离是否能约束 CLI 与 Hook |
+| 授权撤销 | 由 CLI/Provider 管理登录态；VocaMesh 无法统一撤销 | 需实现本机密钥存储、清除、轮换和 Provider 侧撤销说明 | 需定义沙箱内凭据注入、擦除、轮换和会话销毁 |
+| 恢复语义 | 保留现有 Task/Run、停止与 Unknown Run 恢复；不自动重试 | 定义 API 超时/部分结果/幂等请求与计费后的重试语义 | 在沙箱崩溃、VM 快照和主机重启后证明进程清理与 Unknown Run 恢复 |
+| 平台与维护成本 | 等待官方能力，并逐平台验收 | 维护 API 协议、密钥/计费/网络和数据处理；逐平台验收 | 分别维护 macOS、Windows、Linux 沙箱与打包/更新恢复流程 |
+
+当前选择仍是 A。要进入 B，维护者需明确接受独立凭据、计费、网络和数据流设计；要进入 C，需提供逐平台文件、进程、凭据、网络、更新及恢复验收。以上材料是决策准备，不构成方案批准。

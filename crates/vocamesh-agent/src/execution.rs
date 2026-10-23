@@ -131,6 +131,12 @@ pub struct ClaudeCli {
     environment: ExecutionEnvironment,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticationProbeError {
+    Timeout,
+    Failed,
+}
+
 impl ClaudeCli {
     pub fn verify(executable: &Path) -> Result<Self, ServiceError> {
         Self::verify_with_environment(executable, ExecutionEnvironment::current())
@@ -168,15 +174,27 @@ impl ClaudeCli {
     }
 
     pub fn authentication_state(&self) -> AuthenticationState {
-        let Ok(output) = capture(
+        self.authentication_probe_state()
+            .unwrap_or(AuthenticationState::Unknown)
+    }
+
+    pub fn authentication_probe_state(
+        &self,
+    ) -> Result<AuthenticationState, AuthenticationProbeError> {
+        let output = capture(
             &self.executable,
             &["auth", "status"],
             AUTH_TIMEOUT,
             &self.environment,
-        ) else {
-            return AuthenticationState::Unknown;
-        };
-        parse_auth_status(output.status.code(), &output.stdout)
+        )
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                AuthenticationProbeError::Timeout
+            } else {
+                AuthenticationProbeError::Failed
+            }
+        })?;
+        Ok(parse_auth_status(output.status.code(), &output.stdout))
     }
 
     pub fn configure_command(&self, command: &mut Command) {

@@ -20,6 +20,8 @@ describe("native task readiness", () => {
     setActivePinia(createPinia());
     api.isTauri.mockReturnValue(true);
     api.invoke.mockImplementation(async (command: string) => {
+      if (command === "scan_tools") return [];
+      if (command === "get_default_tool_id") return null;
       if (command === "get_execution_readiness") {
         return {
           ready: false,

@@ -1,3 +1,51 @@
+# VocaMesh v0.5 Local Agent Integration 实施报告
+
+> 状态：M1–M6 实现与本地自动化门禁 PASS；M7 macOS GUI BLOCKED。没有进行真实 CLI 认证命令或模型任务，因此本报告不代表真实执行验收。
+
+## 基线、分支与环境
+
+- 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.5-local-agent-integration`；基线：`origin/main` / `77d4bb22ac9e6fca8fe6c58e5e0a8e2c8d2a23e2`。
+- Claude Code `2.1.296`、Codex CLI `0.162.1`；OpenCode CLI 未安装。只执行版本探测；没有运行 `claude auth status`、`codex login status`、`opencode auth list` 或真实模型任务。
+- macOS 当前只有 Command Line Tools，缺少完整 Xcode；没有可验收的 VocaMesh 原生窗口。无关未跟踪项 `.DS_Store`、`.idea/`、`UI/.write-test`、`crates/.DS_Store`、`docs/.DS_Store` 保持未改动且不会纳入提交。
+
+## 实施结果
+
+- **M1 — PASS（状态契约）。** 建立 Core Provider 能力表并同步 Rust/TypeScript；发现、版本、认证、适配器和 Runtime readiness 独立表达，note 不参与决策。没有 SQLite 持久化需求，schema v3 未变。
+- **M2 — PASS（有限发现实现）。** PATH 优先级固定，保留原 macOS 标准目录顺序并补充经过测试的常见包管理器 shim 目录；规范化去重并分别记录展示路径与 canonical 目标。直接固定 `--version`、超时/输出上限/稳定错误码、Provider 文件名校验和 Windows `.cmd`/`.bat` 拒绝均保留。没有 Shell、profile、递归 Home 扫描或凭据文件访问。
+- **M3 — PASS（安全衔接实现）。** Claude Code 复用既有 `ClaudeCli` 固定参数、清理环境及严格认证字段解析；认证超时、探测失败、未知、未登录与已认证有不同状态/原因码。Codex/OpenCode 保持 unsupported/unknown；未运行其认证命令，也未读取凭据。官方资料与决策依据记录在 `docs/adr/0001-agent-execution-boundary.md`。
+- **M4 — PASS（偏好与 UI）。** 默认工具仅表示偏好；扫描不会清除保存值。无执行器的 Provider 不能新设为偏好；Tauri 扫描、验证和保存路径响应都叠加 Runtime readiness，任务入口仍由 readiness 控制。Tauri 不回退 Mock，浏览器 Mock 独立。
+- **M5 — PASS（决策门禁保持）。** `execution.managed-policy-unverified` 和既有 fail-closed 决策未改变；未增加生产绕过开关、执行后端或 schema 迁移。
+
+## 本地质量门禁
+
+最终执行 `./scripts/verify-local.sh`，脚本退出码 `0`。首次运行发现 Rust 格式未应用且 Clippy 的参数数量警告；格式化并将状态值收拢为结构体后重跑，八项全部通过。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | PASS |
+| `cargo test --workspace --offline --quiet` | PASS，88 项测试（Agent 37、Core 3、Tauri 2、Runtime 46） |
+| `cargo check --workspace --all-targets --all-features --offline` | PASS |
+| `pnpm --dir frontend typecheck` | PASS |
+| `pnpm --dir frontend test` | PASS，11 个文件、44 项测试 |
+| `pnpm --dir frontend build` | PASS，Vite production build 完成 |
+| `git diff --check` | PASS |
+
+另运行 `pnpm --dir frontend tauri build --bundles app --no-sign`：PASS，产物 `target/release/bundle/macos/VocaMesh.app`，14.58 MiB。该构建跳过代码签名；仅证明 app bundle 成功生成，不代表窗口启动或 GUI 验收通过。
+
+## 原生、平台与真实 CLI 验收
+
+- **macOS GUI：BLOCKED。** `.app` 已构建，但当前只有 Command Line Tools，且没有可验收原生窗口；未操作 Finder/Launchpad、手动路径、重启持久性、Runtime 门禁或 IPC 错误 UI。
+- **Windows：NOT RUN。** 没有在 Windows 环境构建或运行。
+- **Linux：NOT RUN。** 没有在 Linux 环境构建或运行。
+- **真实 CLI 认证：NOT RUN。** 没有调用 Claude/Codex/OpenCode 登录状态命令。
+- **真实模型请求：NOT RUN。** 没有创建模型任务、发送 Prompt 或读取工作区数据。
+- Playwright E2E 与远端 CI：NOT RUN。
+
+本阶段交付本机工具发现、版本和能力状态接线，不代表真实 Claude Code 任务已验收、Codex/OpenCode 已接入执行器或多 Agent 执行已交付。自动化门禁完成后仍须保留上述 GUI/平台/真实服务边界。
+
+---
+
 # Runtime Foundation v0.2 实施报告
 
 > 所有验证项只记录已实际执行的证据。

@@ -6,13 +6,16 @@ import VocaButton from "@/components/ui/VocaButton.vue";
 import VocaTextarea from "@/components/ui/VocaTextarea.vue";
 import VocaSelect from "@/components/ui/VocaSelect.vue";
 import VocaInput from "@/components/ui/VocaInput.vue";
+import VocaStatus from "@/components/ui/VocaStatus.vue";
 import RuntimeRecoveryPanel from "@/features/tasks/RuntimeRecoveryPanel.vue";
 import type { CreateTaskInput, ExecutionReadiness, Task } from "@/types";
 import { useAgentsStore } from "@/stores/agents";
 import { useTeamsStore } from "@/stores/teams";
 import { useWorkspacesStore } from "@/stores/workspaces";
 import { useTasksStore } from "@/stores/tasks";
+import { useToolsStore } from "@/stores/tools";
 import { useServices } from "@/services/adapters";
+import { toolAuthMeta, toolDiscoveryMeta, toolIntegrationMeta, toolRuntimeMeta, toolVersionMeta } from "@/lib/status";
 
 type Mode = CreateTaskInput["mode"];
 
@@ -33,6 +36,7 @@ const agents = useAgentsStore();
 const teams = useTeamsStore();
 const workspaces = useWorkspacesStore();
 const tasks = useTasksStore();
+const tools = useToolsStore();
 const services = useServices();
 const isNative = services.mode === "tauri";
 const description = ref(defaultDescription);
@@ -48,6 +52,11 @@ const nativeWorkspace = ref("");
 const nativeConsent = ref(false);
 const nativeReadiness = ref<ExecutionReadiness | null>(null);
 const nativeLoading = ref(false);
+const nativeTool = computed(() => tools.tools.find((tool) => tool.id === "claude") ?? null);
+const preferredToolName = computed(() => {
+  if (!tools.defaultToolId) return "未设置";
+  return tools.tools.find((tool) => tool.id === tools.defaultToolId)?.name ?? tools.defaultToolId;
+});
 
 const availableAgents = computed(() => agents.agents.filter((agent) => agent.state === "ready"));
 const availableTeams = computed(() => teams.teams.filter((team) => agents.agents.some((agent) => agent.id === team.supervisorId && agent.state === "ready")));
@@ -72,7 +81,10 @@ async function prepare(): Promise<void> {
     nativeConsent.value = false;
     nativeReadiness.value = null;
     nativeLoading.value = true;
-    try { nativeReadiness.value = await services.execution.readiness(); }
+    try {
+      if (!tools.tools.length) await tools.load();
+      nativeReadiness.value = await services.execution.readiness();
+    }
     catch { nativeReadiness.value = { ready: false, version: null, authState: "unknown", message: "无法读取本机执行安全状态", reasonCode: "storage.read-failed" }; }
     finally { nativeLoading.value = false; }
     return;
@@ -187,7 +199,19 @@ async function submitNative(): Promise<void> {
       </div>
       <div class="v-field">
         <span class="lbl">Provider</span>
-        <div class="v-card v-panel"><span class="v-small">Claude Code · 本机 CLI</span><span class="v-tiny v-muted">Codex 和 OpenCode 本阶段不支持真实执行</span></div>
+        <div class="v-card v-panel">
+          <span class="v-small">Claude Code · 本机 CLI</span>
+          <span class="v-tiny v-muted">偏好工具：{{ preferredToolName }}；偏好不会绕过 Runtime 检查。</span>
+          <div v-if="nativeTool" class="flex flex-wrap gap-[6px]">
+            <VocaStatus :meta="toolDiscoveryMeta(nativeTool.discoveryStatus)" />
+            <VocaStatus :meta="toolVersionMeta(nativeTool.versionStatus)" />
+            <VocaStatus :meta="toolAuthMeta(nativeTool.authState)" />
+            <VocaStatus :meta="toolIntegrationMeta(nativeTool.integrationStatus)" />
+            <VocaStatus :meta="toolRuntimeMeta(nativeTool.runtimeReady, nativeTool.runtimeReasonCode)" />
+          </div>
+          <span v-if="nativeTool?.runtimeReasonCode" class="v-tiny v-muted">Runtime 原因：{{ nativeTool.runtimeReasonCode }}</span>
+          <span class="v-tiny v-muted">Codex 和 OpenCode 本阶段仅支持发现，不支持真实执行。</span>
+        </div>
       </div>
       <div class="v-field">
         <span class="lbl">工作目录</span>
@@ -206,6 +230,7 @@ async function submitNative(): Promise<void> {
       </label>
       <div class="v-banner" :class="nativeReadiness?.ready ? 'is-neutral' : 'is-blocked'">
         <span class="v-tiny">{{ nativeLoading ? '正在检查组织托管策略、CLI 版本与登录状态…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
+        <span v-if="nativeReadiness?.reasonCode" class="v-mono v-tiny">{{ nativeReadiness.reasonCode }}</span>
       </div>
       <RuntimeRecoveryPanel v-if="nativeReadiness?.reasonCode === 'execution.process-state-unknown'" />
       <div v-if="optionsError" class="v-banner is-failure"><AlertTriangle :size="13" /><span class="v-tiny">{{ optionsError }}</span></div>

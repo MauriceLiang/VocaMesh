@@ -1,4 +1,15 @@
-import type { ApprovalState, AgentState, RunState, SubtaskState, TaskState, ToolState } from "@/types";
+import type {
+  ApprovalState,
+  AgentState,
+  RunState,
+  SubtaskState,
+  TaskState,
+  ToolAuthState,
+  ToolDiscoveryStatus,
+  ToolIntegrationStatus,
+  ToolState,
+  ToolVersionStatus,
+} from "@/types";
 import type { StatusTone } from "@/types";
 
 /**
@@ -63,6 +74,55 @@ export const toolStateMeta = (state: ToolState): StatusMeta => {
     case "incompatible": return { label: "不兼容", tone: "failure", icon: "x" };
     default: return { label: "无法检测", tone: "unknown", icon: "help" };
   }
+};
+
+export const toolDiscoveryMeta = (state: ToolDiscoveryStatus): StatusMeta => {
+  switch (state) {
+    case "found": return { label: "已发现", tone: "success", icon: "check" };
+    case "missing": return { label: "未找到", tone: "neutral", icon: "dot" };
+    case "path-invalid": return { label: "路径无效", tone: "failure", icon: "x" };
+    case "probe-failed": return { label: "探测失败", tone: "unknown", icon: "help" };
+  }
+};
+
+export const toolVersionMeta = (state: ToolVersionStatus): StatusMeta => {
+  switch (state) {
+    case "known": return { label: "版本已知", tone: "success", icon: "check" };
+    case "unknown": return { label: "版本未知", tone: "unknown", icon: "help" };
+    case "incompatible": return { label: "版本不兼容", tone: "failure", icon: "x" };
+  }
+};
+
+export const toolAuthMeta = (state: ToolAuthState): StatusMeta => {
+  switch (state) {
+    case "authenticated": return { label: "已登录", tone: "success", icon: "check" };
+    case "unauthenticated": return { label: "未登录", tone: "blocked", icon: "alert" };
+    case "unknown": return { label: "登录状态未知", tone: "unknown", icon: "help" };
+    case "unsupported": return { label: "未支持认证探测", tone: "neutral", icon: "dot" };
+  }
+};
+
+export const toolIntegrationMeta = (state: ToolIntegrationStatus): StatusMeta => {
+  switch (state) {
+    case "adapter-available": return { label: "执行适配器可用", tone: "neutral", icon: "dot" };
+    case "discovery-only": return { label: "仅支持发现", tone: "neutral", icon: "dot" };
+    case "unsupported-platform": return { label: "平台不支持", tone: "failure", icon: "x" };
+    case "blocked-by-policy": return { label: "策略阻断", tone: "blocked", icon: "alert" };
+  }
+};
+
+export const toolRuntimeMeta = (ready: boolean, reasonCode: string | null): StatusMeta => {
+  if (ready) return { label: "Runtime 可执行", tone: "success", icon: "check" };
+  if (reasonCode === "execution.managed-policy-unverified") {
+    return { label: "Runtime 被策略阻断", tone: "blocked", icon: "alert" };
+  }
+  if (reasonCode === "execution.platform-unsupported") {
+    return { label: "Runtime 不支持此平台", tone: "failure", icon: "x" };
+  }
+  if (reasonCode === "tool.adapter-unavailable") {
+    return { label: "无执行适配器", tone: "neutral", icon: "dot" };
+  }
+  return { label: "Runtime 未就绪", tone: "unknown", icon: "help" };
 };
 
 export const agentStateMeta = (state: AgentState): StatusMeta => {

@@ -2,11 +2,12 @@ use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
-    AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings, CatalogStatus,
-    CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness, ExecutionRequest,
-    LocalTool, RecoveryInspection, RecoveryResolution, RunEvent, RunRecord, ScanPhase,
-    ServiceError, TaskRecord, TeamMemberRecord, TeamRecord, ToolScanEvent, UnknownRunSummary,
-    UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput, WorkspaceRecord,
+    derive_tool_state, AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings,
+    CatalogStatus, CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness,
+    ExecutionRequest, LocalTool, RecoveryInspection, RecoveryResolution, RunEvent, RunRecord,
+    ScanPhase, ServiceError, TaskRecord, TeamMemberRecord, TeamRecord, ToolIntegrationStatus,
+    ToolScanEvent, UnknownRunSummary, UpdateAgentInput, UpdateTeamInput,
+    UpdateWorkspaceScopesInput, WorkspaceRecord,
 };
 use vocamesh_runtime::{ExecutionRuntime, RuntimeNotification};
 
@@ -50,6 +51,46 @@ where
         .map_err(|_| ERR_RUNTIME)?
 }
 
+fn apply_runtime_readiness(
+    mut tool: LocalTool,
+    readiness: Option<&ExecutionReadiness>,
+) -> LocalTool {
+    if tool.capabilities.execution_adapter_available {
+        if let Some(readiness) = readiness {
+            tool.runtime_ready = readiness.ready;
+            tool.runtime_reason_code = readiness.reason_code.clone();
+            if readiness.ready {
+                tool.auth_state = vocamesh_core::AuthenticationState::Authenticated;
+            } else if readiness.reason_code.as_deref() == Some("execution.auth-required") {
+                tool.auth_state = vocamesh_core::AuthenticationState::Unauthenticated;
+            } else if readiness.reason_code.as_deref() == Some("execution.auth-unknown") {
+                tool.auth_state = vocamesh_core::AuthenticationState::Unknown;
+            }
+            match readiness.reason_code.as_deref() {
+                Some("execution.managed-policy-unverified") => {
+                    tool.integration_status = ToolIntegrationStatus::BlockedByPolicy;
+                }
+                Some("execution.platform-unsupported") => {
+                    tool.integration_status = ToolIntegrationStatus::UnsupportedPlatform;
+                }
+                _ => {}
+            }
+        } else {
+            tool.runtime_ready = false;
+            tool.runtime_reason_code = Some("storage.read-failed".to_owned());
+        }
+    } else {
+        tool.runtime_ready = false;
+        tool.runtime_reason_code = tool
+            .capabilities
+            .unsupported_reason_code
+            .clone()
+            .or_else(|| Some("tool.adapter-unavailable".to_owned()));
+    }
+    tool.state = derive_tool_state(&tool);
+    tool
+}
+
 #[tauri::command]
 pub(crate) async fn scan_tools(
     app: AppHandle,
@@ -65,12 +106,19 @@ pub(crate) async fn scan_tools(
     );
     let runtime = Arc::clone(&state.runtime);
     let scan_generation = Arc::clone(&state.scan_generation);
+    let execution = state.execution.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
         if scan_generation.load(Ordering::SeqCst) != generation {
             return Err(ERR_SCAN_SUPERSEDED);
         }
-        runtime.scan_tools()
+        runtime.scan_tools().map(|tools| {
+            tools
+                .into_iter()
+                .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+                .collect()
+        })
     })
     .await
     .map_err(|_| ERR_RUNTIME)?;
@@ -104,10 +152,17 @@ pub(crate) async fn verify_tool(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<LocalTool, ServiceError> {
-    with_runtime(Arc::clone(&state.runtime), move |runtime| {
-        runtime.verify_tool(&id)
+    let runtime = Arc::clone(&state.runtime);
+    let execution = state.execution.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
+        let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
+        runtime
+            .verify_tool(&id)
+            .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
     })
     .await
+    .map_err(|_| ERR_RUNTIME)?
 }
 
 #[tauri::command]
@@ -116,10 +171,17 @@ pub(crate) async fn set_tool_path(
     id: String,
     path: String,
 ) -> Result<LocalTool, ServiceError> {
-    with_runtime(Arc::clone(&state.runtime), move |runtime| {
-        runtime.set_tool_path(&id, &path)
+    let runtime = Arc::clone(&state.runtime);
+    let execution = state.execution.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
+        let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
+        runtime
+            .set_tool_path(&id, &path)
+            .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
     })
     .await
+    .map_err(|_| ERR_RUNTIME)?
 }
 
 #[tauri::command]
@@ -561,5 +623,75 @@ fn emit_runtime(app: &AppHandle, notification: RuntimeNotification) {
         RuntimeNotification::Event(event) => {
             let _ = app.emit("run://event", event);
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_readiness_tests {
+    use super::*;
+    use vocamesh_core::{
+        AuthenticationState, Provider, ToolDiscoveryStatus, ToolState, ToolVersionStatus,
+    };
+
+    fn discovered_claude() -> LocalTool {
+        let mut tool = LocalTool::unavailable(Provider::Claude, ToolState::Undetectable, "test");
+        tool.discovery_status = ToolDiscoveryStatus::Found;
+        tool.version_status = ToolVersionStatus::Known;
+        tool.integration_status = ToolIntegrationStatus::AdapterAvailable;
+        tool.auth_state = AuthenticationState::Authenticated;
+        tool
+    }
+
+    #[test]
+    fn managed_policy_readiness_is_overlaid_without_marking_the_tool_ready() {
+        let readiness = ExecutionReadiness {
+            ready: false,
+            version: Some("2.1.296".into()),
+            auth_state: AuthenticationState::Unknown,
+            message: "policy not verified".into(),
+            reason_code: Some("execution.managed-policy-unverified".into()),
+        };
+
+        let tool = apply_runtime_readiness(discovered_claude(), Some(&readiness));
+
+        assert_eq!(
+            tool.integration_status,
+            ToolIntegrationStatus::BlockedByPolicy
+        );
+        assert_eq!(
+            tool.runtime_reason_code.as_deref(),
+            Some("execution.managed-policy-unverified")
+        );
+        assert!(!tool.runtime_ready);
+        assert_eq!(tool.state, ToolState::Undetectable);
+        assert_eq!(tool.auth_state, AuthenticationState::Authenticated);
+    }
+
+    #[test]
+    fn runtime_readiness_does_not_make_discovery_only_provider_executable() {
+        let readiness = ExecutionReadiness {
+            ready: true,
+            version: Some("2.1.296".into()),
+            auth_state: AuthenticationState::Authenticated,
+            message: "ready".into(),
+            reason_code: None,
+        };
+        let mut codex = LocalTool::unavailable(Provider::Codex, ToolState::Missing, "test");
+        codex.discovery_status = ToolDiscoveryStatus::Found;
+        codex.version_status = ToolVersionStatus::Known;
+
+        let codex = apply_runtime_readiness(codex, Some(&readiness));
+
+        assert!(!codex.runtime_ready);
+        assert_eq!(
+            codex.integration_status,
+            ToolIntegrationStatus::DiscoveryOnly
+        );
+        assert_eq!(codex.auth_state, AuthenticationState::Unsupported);
+        assert_eq!(
+            codex.runtime_reason_code.as_deref(),
+            Some("tool.adapter-unavailable")
+        );
+        assert_eq!(codex.state, ToolState::Undetectable);
     }
 }

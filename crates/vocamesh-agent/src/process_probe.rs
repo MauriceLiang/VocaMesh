@@ -1,11 +1,13 @@
+use crate::execution::{AuthenticationProbeError, ClaudeCli, ExecutionEnvironment};
 use std::{
-    io::{Read, Take},
+    io::Read,
     path::Path,
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
+use vocamesh_core::{AuthenticationState, Provider};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_LIMIT: usize = 8 * 1024;
@@ -31,9 +33,8 @@ impl ProbeError {
         match self {
             Self::Timeout => "tool.probe-timeout",
             Self::NonZeroExit => "tool.version-unavailable",
-            Self::OutputTooLarge | Self::UnsupportedLauncher | Self::InvalidOutput => {
-                "tool.version-unavailable"
-            }
+            Self::OutputTooLarge | Self::InvalidOutput => "tool.version-unavailable",
+            Self::UnsupportedLauncher => "tool.unsupported-launcher",
             Self::SpawnFailure => "tool.scan-failed",
         }
     }
@@ -43,7 +44,7 @@ impl ProbeError {
             Self::Timeout => "固定版本探测命令超时",
             Self::NonZeroExit => "固定版本探测命令返回失败状态",
             Self::OutputTooLarge => "版本输出超过安全上限，已丢弃",
-            Self::UnsupportedLauncher => "当前平台无法安全启动该 CLI shim",
+            Self::UnsupportedLauncher => "检测到启动器，但当前无法安全探测",
             Self::SpawnFailure => "无法启动固定版本探测命令",
             Self::InvalidOutput => "版本输出无法安全解码",
         }
@@ -52,17 +53,50 @@ impl ProbeError {
 
 pub trait ProcessProbe: Send + Sync {
     fn version(&self, executable: &Path) -> Result<ProcessOutput, ProbeError>;
+
+    fn authentication(&self, provider: Provider, executable: &Path) -> AuthenticationProbeResult {
+        let _ = executable;
+        if provider == Provider::Claude {
+            AuthenticationProbeResult {
+                state: AuthenticationState::Unknown,
+                reason_code: Some("execution.auth-unknown"),
+            }
+        } else {
+            AuthenticationProbeResult {
+                state: AuthenticationState::Unsupported,
+                reason_code: None,
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CliProcessProbe;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticationProbeResult {
+    pub state: AuthenticationState,
+    pub reason_code: Option<&'static str>,
+}
+
+#[derive(Clone)]
+pub struct CliProcessProbe {
+    environment: ExecutionEnvironment,
+}
+
+impl Default for CliProcessProbe {
+    fn default() -> Self {
+        Self {
+            environment: ExecutionEnvironment::current(),
+        }
+    }
+}
 
 impl ProcessProbe for CliProcessProbe {
     fn version(&self, executable: &Path) -> Result<ProcessOutput, ProbeError> {
         if crate::path_resolver::is_windows_script(executable) {
             return Err(ProbeError::UnsupportedLauncher);
         }
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        self.environment.apply(&mut command);
+        let mut child = command
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -106,6 +140,44 @@ impl ProcessProbe for CliProcessProbe {
             stdout: String::from_utf8(stdout).map_err(|_| ProbeError::InvalidOutput)?,
         })
     }
+
+    fn authentication(&self, provider: Provider, executable: &Path) -> AuthenticationProbeResult {
+        if provider != Provider::Claude || crate::path_resolver::is_windows_script(executable) {
+            return AuthenticationProbeResult {
+                state: AuthenticationState::Unsupported,
+                reason_code: None,
+            };
+        }
+        let probe = ClaudeCli::verify_with_environment(executable, self.environment.clone())
+            .map_err(|_| AuthenticationProbeError::Failed)
+            .and_then(|cli| cli.authentication_probe_state());
+        classify_authentication_probe(probe)
+    }
+}
+
+fn classify_authentication_probe(
+    probe: Result<AuthenticationState, AuthenticationProbeError>,
+) -> AuthenticationProbeResult {
+    let (state, reason_code) = match probe {
+        Ok(AuthenticationState::Authenticated) => (AuthenticationState::Authenticated, None),
+        Ok(AuthenticationState::Unauthenticated) => (
+            AuthenticationState::Unauthenticated,
+            Some("execution.auth-required"),
+        ),
+        Ok(AuthenticationState::Unknown) => {
+            (AuthenticationState::Unknown, Some("execution.auth-unknown"))
+        }
+        Ok(AuthenticationState::Unsupported) => (AuthenticationState::Unsupported, None),
+        Err(AuthenticationProbeError::Timeout) => (
+            AuthenticationState::Unknown,
+            Some("execution.auth-probe-timeout"),
+        ),
+        Err(AuthenticationProbeError::Failed) => (
+            AuthenticationState::Unknown,
+            Some("execution.auth-probe-failed"),
+        ),
+    };
+    AuthenticationProbeResult { state, reason_code }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,24 +186,38 @@ enum Pipe {
     Stderr,
 }
 
+struct PipeCapture {
+    bytes: Vec<u8>,
+    oversized: bool,
+}
+
 fn spawn_reader<R: Read + Send + 'static>(
     reader: R,
     pipe: Pipe,
-    sender: Sender<(Pipe, Result<Vec<u8>, ProbeError>)>,
+    sender: Sender<(Pipe, Result<PipeCapture, ProbeError>)>,
 ) {
     thread::spawn(move || {
-        let mut bounded: Take<R> = reader.take((OUTPUT_LIMIT + 1) as u64);
+        let mut reader = reader;
         let mut bytes = Vec::with_capacity(OUTPUT_LIMIT + 1);
-        let result = bounded
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-            .map_err(|_| ProbeError::InvalidOutput);
+        let mut oversized = false;
+        let mut buffer = [0; 4096];
+        let result = loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break Ok(PipeCapture { bytes, oversized }),
+                Ok(count) => {
+                    let available = (OUTPUT_LIMIT + 1).saturating_sub(bytes.len());
+                    bytes.extend_from_slice(&buffer[..count.min(available)]);
+                    oversized |= count > available || bytes.len() > OUTPUT_LIMIT;
+                }
+                Err(_) => break Err(ProbeError::InvalidOutput),
+            }
+        };
         let _ = sender.send((pipe, result));
     });
 }
 
 fn receive_pipes(
-    receiver: Receiver<(Pipe, Result<Vec<u8>, ProbeError>)>,
+    receiver: Receiver<(Pipe, Result<PipeCapture, ProbeError>)>,
     deadline: Instant,
 ) -> Result<(Vec<u8>, Vec<u8>), ProbeError> {
     let mut stdout = None;
@@ -144,13 +230,13 @@ fn receive_pipes(
         let (pipe, result) = receiver
             .recv_timeout(remaining)
             .map_err(|_| ProbeError::Timeout)?;
-        let bytes = result?;
-        if bytes.len() > OUTPUT_LIMIT {
+        let capture = result?;
+        if capture.oversized || capture.bytes.len() > OUTPUT_LIMIT {
             return Err(ProbeError::OutputTooLarge);
         }
         match pipe {
-            Pipe::Stdout => stdout = Some(bytes),
-            Pipe::Stderr => stderr = Some(bytes),
+            Pipe::Stdout => stdout = Some(capture.bytes),
+            Pipe::Stderr => stderr = Some(capture.bytes),
         }
     }
     Ok((stdout.unwrap_or_default(), stderr.unwrap_or_default()))
@@ -160,6 +246,22 @@ fn receive_pipes(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn authentication_probe_errors_remain_distinct_from_not_logged_in() {
+        let unauthenticated =
+            classify_authentication_probe(Ok(AuthenticationState::Unauthenticated));
+        assert_eq!(unauthenticated.state, AuthenticationState::Unauthenticated);
+        assert_eq!(unauthenticated.reason_code, Some("execution.auth-required"));
+
+        let timed_out = classify_authentication_probe(Err(AuthenticationProbeError::Timeout));
+        assert_eq!(timed_out.state, AuthenticationState::Unknown);
+        assert_eq!(timed_out.reason_code, Some("execution.auth-probe-timeout"));
+
+        let failed = classify_authentication_probe(Err(AuthenticationProbeError::Failed));
+        assert_eq!(failed.state, AuthenticationState::Unknown);
+        assert_eq!(failed.reason_code, Some("execution.auth-probe-failed"));
+    }
 
     #[test]
     fn output_capture_is_bounded_and_does_not_include_full_overflow() {
@@ -174,13 +276,42 @@ mod tests {
         );
         let (sender, receiver) = mpsc::channel();
         sender
-            .send((Pipe::Stdout, Ok(vec![b'x'; OUTPUT_LIMIT + 1])))
+            .send((
+                Pipe::Stdout,
+                Ok(PipeCapture {
+                    bytes: vec![b'x'; OUTPUT_LIMIT + 1],
+                    oversized: true,
+                }),
+            ))
             .unwrap();
-        sender.send((Pipe::Stderr, Ok(Vec::new()))).unwrap();
+        sender
+            .send((
+                Pipe::Stderr,
+                Ok(PipeCapture {
+                    bytes: Vec::new(),
+                    oversized: false,
+                }),
+            ))
+            .unwrap();
         assert_eq!(
             receive_pipes(receiver, Instant::now() + Duration::from_secs(1)),
             Err(ProbeError::OutputTooLarge)
         );
+    }
+
+    #[test]
+    fn reader_keeps_bounded_prefix_and_drains_all_overflow() {
+        let (sender, receiver) = mpsc::channel();
+        spawn_reader(
+            Cursor::new(vec![b'x'; OUTPUT_LIMIT + 100_000]),
+            Pipe::Stdout,
+            sender,
+        );
+        let (pipe, result) = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let capture = result.unwrap();
+        assert!(matches!(pipe, Pipe::Stdout));
+        assert_eq!(capture.bytes.len(), OUTPUT_LIMIT + 1);
+        assert!(capture.oversized);
     }
 
     #[test]
