@@ -5,6 +5,7 @@
 ## 基线与本机证据
 
 - 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.6-auth-readiness-diagnostics`；基线：`origin/main` / `76cafd0266ef15ec88c609eb3e1847b5156670f`（PR #8 合并提交）。
+- 实施提交：`864f2c1dfdd1ce6a56a64d052c2ad700009b8129`；PR [#9](https://github.com/MauriceLiang/VocaMesh/pull/9) 已创建并推送，当前 open，未合并。
 - Claude Code `2.1.296`。在受控本机环境中使用应用相同的环境 allowlist、固定 `claude auth status`、5 秒超时和 16 KiB 输出上限执行一次只读认证探测：退出码类别 `0`、JSON object、`loggedIn=true`、`authMethod=oauth_token`，解析结论为已认证。没有记录原始输出、邮箱、组织标识或配置路径；没有发送 Prompt 或模型请求。
 - 普通工具扫描仍跳过认证探测；主动验证使用同一认证解析器和安全参数。readiness 将认证、CLI、Run、存储、平台及 managed policy 分开报告，认证结果不会改变策略门禁。
 - SQLite schema v3 未变。没有添加 GitHub Actions，没有开放绕过开关、直接 API Provider、沙箱后端或新增执行权限。

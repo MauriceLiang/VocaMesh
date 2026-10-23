@@ -55,3 +55,5 @@
 本机固定只读 `claude auth status` 探测通过：Claude Code `2.1.296`，退出码 0，JSON object，`loggedIn=true`、`authMethod=oauth_token`。没有发送模型请求。生产 `execution.managed-policy-unverified` 保持 fail-closed；SQLite schema v3、只读执行边界和 Provider 范围未变。
 
 `./scripts/verify-local.sh` 退出码 0：Rust workspace 99 项测试（Agent 40、Core 4、Tauri 2、Runtime 53），前端 11 个文件/47 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查全部 PASS。macOS GUI 因 Computer Use 未获准访问应用为 BLOCKED；Windows、Linux、Playwright E2E、远端 CI 和真实模型任务本轮未运行。实施报告和 ADR 记录逐项证据。
+
+代码提交 `864f2c1dfdd1ce6a56a64d052c2ad700009b8129` 已推送；PR [#9](https://github.com/MauriceLiang/VocaMesh/pull/9) 已创建，待审阅。
