@@ -1,3 +1,40 @@
+# VocaMesh v0.6 Auth Readiness Diagnostics 实施报告
+
+> 状态：代码、Rust/前端自动化与本机只读认证探测 PASS；managed policy 仍 fail-closed。macOS GUI BLOCKED；真实模型任务、Windows/Linux、Playwright E2E 和远端 CI 未运行。
+
+## 基线与本机证据
+
+- 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.6-auth-readiness-diagnostics`；基线：`origin/main` / `76cafd0266ef15ec88c609eb3e1847b5156670f`（PR #8 合并提交）。
+- Claude Code `2.1.296`。在受控本机环境中使用应用相同的环境 allowlist、固定 `claude auth status`、5 秒超时和 16 KiB 输出上限执行一次只读认证探测：退出码类别 `0`、JSON object、`loggedIn=true`、`authMethod=oauth_token`，解析结论为已认证。没有记录原始输出、邮箱、组织标识或配置路径；没有发送 Prompt 或模型请求。
+- 普通工具扫描仍跳过认证探测；主动验证使用同一认证解析器和安全参数。readiness 将认证、CLI、Run、存储、平台及 managed policy 分开报告，认证结果不会改变策略门禁。
+- SQLite schema v3 未变。没有添加 GitHub Actions，没有开放绕过开关、直接 API Provider、沙箱后端或新增执行权限。
+- 无关未跟踪项 `.DS_Store`、`.idea/`、`UI/.write-test`、`crates/.DS_Store`、`docs/.DS_Store` 保持原样，不纳入提交。
+
+## 本地质量门禁
+
+最终执行 `./scripts/verify-local.sh`，退出码 `0`，八项全部 PASS：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | PASS |
+| `cargo test --workspace --offline --quiet` | PASS，99 项测试（Agent 40、Core 4、Tauri 2、Runtime 53） |
+| `cargo check --workspace --all-targets --all-features --offline` | PASS |
+| `pnpm --dir frontend typecheck` | PASS |
+| `pnpm --dir frontend test` | PASS，11 个文件、47 项测试 |
+| `pnpm --dir frontend build` | PASS，Vite production build 完成 |
+| `git diff --check` | PASS |
+
+## 原生、平台与真实任务验收
+
+- **macOS GUI：BLOCKED。** Computer Use 未获准访问 VocaMesh，因此无法启动并操作可验收的原生窗口。本轮不把构建/typecheck/unit tests 当作 GUI 验收。
+- **Windows/Linux：NOT RUN。** 本轮没有在这些系统构建或运行。
+- **Playwright E2E / 远端 CI：NOT RUN。** 本仓库本轮没有新增 GitHub Actions。
+- **真实模型任务：NOT RUN。** 没有创建任务、发送 Prompt 或读取工作区数据。
+- **认证探测：PASS（只读状态探测）。** 此结果只证明本机认证命令输出可按当前契约解析，不证明 managed hooks 安全、Runtime 可启动真实任务、模型连接成功或账户费用行为。
+
+本阶段按方案 A 继续 fail-closed：生产 readiness 仍包含 `execution.managed-policy-unverified`，任务启动入口继续复查硬门禁。详细决策见 `docs/adr/0001-agent-execution-boundary.md`。
+
 # VocaMesh v0.5 Local Agent Integration 实施报告
 
 > 状态：M1–M6 实现与本地自动化门禁 PASS；M7 macOS GUI BLOCKED。没有进行真实 CLI 认证命令或模型任务，因此本报告不代表真实执行验收。

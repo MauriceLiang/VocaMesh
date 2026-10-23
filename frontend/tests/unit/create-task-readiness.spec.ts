@@ -26,8 +26,22 @@ describe("native task readiness", () => {
         return {
           ready: false,
           version: null,
-          authState: "unknown",
+          authState: "authenticated",
           message: "无法确认组织托管 Hook 是否会产生额外副作用；真实执行已禁用",
+          reasonCode: "execution.managed-policy-unverified",
+          policyStatus: "unverified",
+          checks: [
+            { id: "localStorage", status: "passed", reasonCode: null },
+            { id: "activeRun", status: "passed", reasonCode: null },
+            { id: "processState", status: "passed", reasonCode: null },
+            { id: "platform", status: "passed", reasonCode: null },
+            { id: "cliDiscovery", status: "passed", reasonCode: null },
+            { id: "cliVersion", status: "passed", reasonCode: null },
+            { id: "authentication", status: "passed", reasonCode: null },
+            { id: "managedPolicy", status: "blocked", reasonCode: "execution.managed-policy-unverified" },
+            { id: "taskStart", status: "blocked", reasonCode: "execution.managed-policy-unverified" },
+          ],
+          blockers: [{ check: "managedPolicy", reasonCode: "execution.managed-policy-unverified" }],
         };
       }
       return undefined;
@@ -47,6 +61,9 @@ describe("native task readiness", () => {
     await flushPromises();
 
     expect(document.body.textContent).toContain("无法确认组织托管 Hook");
+    expect(document.body.textContent).toContain("Claude Code 已登录，但执行仍被托管策略阻断。");
+    expect(document.body.textContent).toContain("托管策略");
+    expect(document.body.textContent).toContain("Claude Code 认证");
     const start = Array.from(document.body.querySelectorAll("button"))
       .find((button) => button.textContent?.includes("开始只读任务"));
     expect(start?.disabled).toBe(true);

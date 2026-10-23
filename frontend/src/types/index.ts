@@ -338,6 +338,33 @@ export interface ExecutionReadiness {
   authState: ToolAuthState;
   message: string;
   reasonCode: string | null;
+  policyStatus: ExecutionPolicyStatus;
+  checks: ExecutionCheck[];
+  blockers: ExecutionBlocker[];
+}
+
+export type ExecutionPolicyStatus = "verified" | "unverified";
+export type ExecutionCheckId =
+  | "localStorage"
+  | "activeRun"
+  | "processState"
+  | "platform"
+  | "cliDiscovery"
+  | "cliVersion"
+  | "authentication"
+  | "managedPolicy"
+  | "taskStart";
+export type ExecutionCheckStatus = "passed" | "failed" | "blocked" | "unknown" | "unsupported";
+
+export interface ExecutionCheck {
+  id: ExecutionCheckId;
+  status: ExecutionCheckStatus;
+  reasonCode: string | null;
+}
+
+export interface ExecutionBlocker {
+  check: ExecutionCheckId;
+  reasonCode: string;
 }
 
 export interface StartReadOnlyTaskInput {

@@ -4,19 +4,19 @@
 
 Rust Core 的 Provider 能力表是 Claude Code、Codex CLI、OpenCode 的单一能力来源：包含 Provider ID、显示名、可执行文件名、发现/版本探测能力、VocaMesh 执行适配器、认证探测能力、可证明的最低版本和稳定阻断原因。Claude Code 的最低版本为 `2.1.259`；Codex/OpenCode 只报告实际解析到的版本，不据此推断兼容执行。当前只有 Claude Code 有适配器。
 
-`LocalTool` 将发现、版本、认证、集成能力和 Runtime readiness 分开序列化。路径无效、探测失败、版本未知/不兼容、认证未知/未登录、适配器缺失和策略阻断分别通过枚举及 `reasonCode` 表达。`note` 仅用于界面文案。字段不持久化，因此不修改 SQLite schema v3。Agent 发现层不推断全局执行策略；Tauri 在扫描、验证及保存路径响应中叠加 `ExecutionRuntime::readiness()`。
+`LocalTool` 将发现、版本、认证、集成能力和 Runtime readiness 分开序列化。路径无效、探测失败、版本未知/不兼容、认证未知/未登录、适配器缺失和策略阻断分别通过枚举及 `reasonCode` 表达。`note` 仅用于界面文案。字段不持久化，因此不修改 SQLite schema v3。Agent 发现层不推断全局执行策略；Tauri 普通扫描、认证验证和保存路径时基于已有 `LocalTool` 调用 `ExecutionRuntime::readiness_for_tool()`，不会重复启动认证探测。显式请求完整 readiness 时才调用 `ExecutionRuntime::readiness()` 并执行一次只读预检。
 
 发现按进程 `PATH` 顺序优先，再按固定顺序检查 macOS `/opt/homebrew/bin`、`/usr/local/bin`、Home 下已有的 `.local/bin`、`.bun/bin`，以及 `.cargo/bin`、`.volta/bin`、`.asdf/shims`、`.local/share/mise/shims`、`.npm-global/bin`。不运行 Shell、读取 Shell 配置或递归扫描 Home。候选目录规范化后去重；结果保留展示路径和 canonical 目标路径。手动路径必须为 Provider 文件名匹配的绝对可执行普通文件；保存只验证路径，不启动程序，之后重新检测才会直接启动该程序并传入固定 `--version`。版本/认证输出均有上限、超时和固定错误码，不记录原始输出。Windows `.cmd`/`.bat` shim 继续安全拒绝。
 
 工具页的“设为偏好”仅保存偏好：扫描或 Runtime 阻断不会清除此值；只有具有执行适配器、路径已发现且版本已解析的 Provider 可设为偏好。偏好不等于授权。任务入口仍只由 Runtime readiness 控制，并在 Rust 启动入口复查。Tauri 的缺失时间和来源不冒充演示数据，IPC 错误不回退到 Mock；浏览器 Mock 继续独立运行。
 
-认证探测复用 `ClaudeCli` 的固定 `claude auth status`、清理后环境、stdout 上限和严格 JSON/退出码解析。只有退出码与 allowlist 字段组合明确时才判已认证或未认证；未知输出保持未知，超时和一般探测失败使用不同稳定原因码。认证成功不会改变 `execution.managed-policy-unverified`。Codex/OpenCode 的认证状态保持 unsupported/unknown，不运行登录态命令、不读配置/凭据、不发起模型请求。官方契约与理由见 ADR 0001 v0.5 补充证据。
+认证探测复用 `ClaudeCli` 的固定 `claude auth status`、清理后环境、有界 stdout/stderr 和严格 JSON/退出码解析。JSON 必须包含布尔 `loggedIn` 与已知 `authMethod`；登录字段、方法和退出码互相矛盾时保持未知，格式不识别、超时、探测失败及 CLI 参数不兼容分别使用稳定原因码。认证成功不会改变 `execution.managed-policy-unverified`。Codex/OpenCode 的认证状态保持 unsupported/unknown，不运行登录态命令、不读配置/凭据、不发起模型请求。官方契约和本机只读探测证据见 ADR 0001 v0.6 补充记录。
 
 ## 支持范围与安全就绪状态
 
 只有 Claude Code 有单 Agent Runtime 实现。Codex/OpenCode 仍可发现，但不能执行。Windows 真实执行固定关闭。当前 Unix/macOS readiness 也因 managed hooks 策略无法可靠核实而 fail-closed；用户界面和后端任务入口都会拒绝启动。受限参数和 fake CLI 测试不等于真实执行安全门禁通过。
 
-CLI 必须是绝对路径上的普通可执行文件，最低版本为 `2.1.259`：`--restricted` 从 `2.1.248` 起可用，`--permission-prompts none` 从 `2.1.259` 起可用。低版本、版本探测失败、认证状态不明或策略门禁未通过时拒绝执行，不回退到默认权限。本机 Claude Code `2.1.296` 是先前验收轮次记录的版本；本轮没有重新运行认证探测或真实 CLI 任务。
+CLI 必须是绝对路径上的普通可执行文件，最低版本为 `2.1.259`：`--restricted` 从 `2.1.248` 起可用，`--permission-prompts none` 从 `2.1.259` 起可用。低版本、版本探测失败、认证状态不明或策略门禁未通过时拒绝执行，不回退到默认权限。本轮固定只读探测记录 Claude Code `2.1.296` 与认证已确认；没有启动真实模型任务。
 
 ## managed hooks 门禁
 
@@ -28,9 +28,9 @@ VocaMesh 没有受支持的非交互 preflight 能力来可靠判断当前会话
 
 ## CLI 探测与统一环境
 
-`--version`、`auth status` 和任务进程使用同一份 `ExecutionEnvironment` allowlist，避免探测通过、实际任务环境却不同。环境仅继承 `PATH`、用户目录、临时目录、locale、终端标识与 `CLAUDE_CONFIG_DIR`，并清除其他环境变量。认证探测使用固定 `claude auth status` 参数，最多保留 16 KiB stdout 并只解析退出码和 `authMethod`：退出码 0 且方法是 `claude.ai` 或 `oauth_token` 才分类为已认证；退出码 1 且方法为 `none` 才分类为未认证；其他组合均为 `unknown`。
+`--version`、`auth status` 和任务进程使用同一份 `ExecutionEnvironment` allowlist，避免探测通过、实际任务环境却不同。环境仅继承 `PATH`、用户目录、临时目录、locale、终端标识与 `CLAUDE_CONFIG_DIR`，并清除其他环境变量。认证探测使用固定 `claude auth status` 参数，最多保留 16 KiB stdout/stderr。解析器要求 JSON 对象中的 `loggedIn` 为布尔值、`authMethod` 为官方已知枚举（`none`、`claude.ai`、`oauth_token`、`api_key`、`api_key_helper`、`third_party`），并要求字段与退出码一致：退出码 0、`loggedIn=true` 且方法非 `none` 才分类为已认证；退出码 1、`loggedIn=false` 且方法为 `none` 才分类为未认证。有效但不能判断的退出状态返回未知；缺字段、类型错误、未知枚举、矛盾或畸形输出返回 `execution.auth-output-unrecognized`。原始输出不进入错误消息、UI、日志或持久化存储。
 
-任务 `stderr` 最多在内存保留 16 KiB，同时持续排空剩余管道。纯分类器只返回固定的无效参数、认证、配置或一般失败类别，对应稳定错误码；原始 stderr 不进入数据库、事件、UI 或日志。版本/认证探测的 stderr 也只排空并丢弃。
+任务 `stderr` 最多在内存保留 16 KiB，同时持续排空剩余管道。纯分类器只返回固定的无效参数、认证、配置或一般失败类别，对应稳定错误码；原始 stderr 不进入数据库、事件、UI 或日志。认证探测只用有界 stderr 分类 CLI 参数不兼容，其余原文随即丢弃；版本探测 stderr 只排空并丢弃。
 
 ## 固定只读启动参数
 
@@ -58,7 +58,7 @@ Runtime 提供 `list_unknown_runs`、`inspect_unknown_run` 和 `resolve_unknown_
 
 归档需要用户在操作系统进程管理工具中人工核验并明确确认。Runtime 在 `start_gate` 内重新检查 PGID、事务更新任务/Run 并写入审计事件；Run 归档为失败，原 `error_code` 保留。数据库提交后才删除由受信任数据目录和 UUID 请求 ID 派生的快照；Unix 清理通过 `O_NOFOLLOW` 目录描述符和 `unlinkat` 执行，清理失败留下固定审计事件并经 `RecoveryResolution.snapshotStatus` 返回，不会将 Run 改为成功或自动重跑。恢复状态、PGID 和最近检查时间不会改变 `execution.managed-policy-unverified` 的生产门禁。
 
-`ExecutionReadiness.reasonCode` 区分 Unknown Run、managed policy、CLI 缺失/不兼容、认证未知/未登录、平台禁用与存储错误。存储检查错误不会被归类成进程未知；策略门禁仍先于 CLI 认证探测。桌面恢复面板展示短 Run ID、任务标题、状态、错误码、快照存在状态和操作指引；不展示绝对路径、不接受前端进程标识，不提供强杀、删快照解锁或重试。
+`ExecutionReadiness` 保留兼容字段并附带独立的 `checks`、`blockers` 和 `policyStatus`；分别报告存储、活动 Run、Unknown Run/进程状态、平台、CLI 发现/版本、认证、managed policy 与任务启动结果。认证/CLI 预检与策略检查独立运行，首要 `reasonCode` 在存在策略阻断时仍优先报告 `execution.managed-policy-unverified`。`ready` 是所有硬门禁的合取；`start_read_only_task()` 不接受或复用 readiness 快照，仍在后端重新验证启动门禁。桌面恢复面板展示短 Run ID、任务标题、状态、错误码、快照存在状态和操作指引；不展示绝对路径、不接受前端进程标识，不提供强杀、删快照解锁或重试。
 
 ## 输出与结果
 

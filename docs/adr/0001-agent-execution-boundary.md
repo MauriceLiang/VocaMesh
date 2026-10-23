@@ -59,3 +59,18 @@ Codex CLI 官方文档说明 `codex login status` 输出当前认证模式并以
 | 平台与维护成本 | 等待官方能力，并逐平台验收 | 维护 API 协议、密钥/计费/网络和数据处理；逐平台验收 | 分别维护 macOS、Windows、Linux 沙箱与打包/更新恢复流程 |
 
 当前选择仍是 A。要进入 B，维护者需明确接受独立凭据、计费、网络和数据流设计；要进入 C，需提供逐平台文件、进程、凭据、网络、更新及恢复验收。以上材料是决策准备，不构成方案批准。
+
+## v0.6 认证诊断与 readiness 补充决策
+
+本阶段仍采用方案 A：Claude Code CLI 生产执行保持 fail-closed。`execution.managed-policy-unverified` 仍为生产策略状态；认证成功只更新认证诊断，不授权任务、不开放策略开关，也不引入 API Provider 或 OS 沙箱。
+
+### 已核实事实
+
+- 官方 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) 为 `claude auth status` 定义 JSON 输出、登录/未登录退出状态和 `loggedIn`、`authMethod` 字段；已认证方法枚举包含 `claude.ai`、`oauth_token`、`api_key`、`api_key_helper`、`third_party`，未认证方法为 `none`。
+- 本机 Claude Code 版本 `2.1.296`。在与应用相同的环境 allowlist、固定参数、5 秒超时和 16 KiB 输出上限下，只读调用一次 `claude auth status`：退出码类别为成功（0），格式为 JSON object，`loggedIn=true`、`authMethod=oauth_token`，解析为已认证。没有保存或展示原始输出、邮箱、组织标识或配置路径；没有发送 Prompt 或发起模型请求。
+- 认证解析要求 `loggedIn`、`authMethod` 和退出码相互一致；格式不识别、字段矛盾、未知退出状态、超时、探测失败和 CLI 参数不兼容分别保持未知并使用稳定原因码。普通扫描不会触发认证探测。
+- Runtime readiness 同时返回存储、活动/未知 Run、平台、CLI 发现/版本、认证、managed policy 与任务启动检查；策略与认证状态独立。即使认证已确认，只要 managed policy 未核验，`ready=false`，启动入口仍会重新执行硬门禁检查。
+
+### 仍未知或未验收
+
+本机认证探测不能证明 managed hooks 的副作用边界，也不能证明真实任务可以成功运行。没有启动模型任务。macOS 原生 GUI 验收因 Computer Use 未获准访问 VocaMesh 而 BLOCKED；Windows、Linux、Playwright E2E 和远端 CI 本轮未运行。以上证据不改变方案 A，也不授权路线 B/C。

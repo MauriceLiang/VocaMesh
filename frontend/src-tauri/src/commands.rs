@@ -3,11 +3,12 @@ use tauri::{AppHandle, Emitter, State};
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
     derive_tool_state, AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings,
-    CatalogStatus, CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness,
-    ExecutionRequest, LocalTool, RecoveryInspection, RecoveryResolution, RunEvent, RunRecord,
-    ScanPhase, ServiceError, TaskRecord, TeamMemberRecord, TeamRecord, ToolIntegrationStatus,
-    ToolScanEvent, UnknownRunSummary, UpdateAgentInput, UpdateTeamInput,
-    UpdateWorkspaceScopesInput, WorkspaceRecord,
+    CatalogStatus, CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionCheckId,
+    ExecutionCheckStatus, ExecutionPolicyStatus, ExecutionReadiness, ExecutionRequest, LocalTool,
+    RecoveryInspection, RecoveryResolution, RunEvent, RunRecord, ScanPhase, ServiceError,
+    TaskRecord, TeamMemberRecord, TeamRecord, ToolIntegrationStatus, ToolScanEvent,
+    UnknownRunSummary, UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput,
+    WorkspaceRecord,
 };
 use vocamesh_runtime::{ExecutionRuntime, RuntimeNotification};
 
@@ -59,21 +60,14 @@ fn apply_runtime_readiness(
         if let Some(readiness) = readiness {
             tool.runtime_ready = readiness.ready;
             tool.runtime_reason_code = readiness.reason_code.clone();
-            if readiness.ready {
-                tool.auth_state = vocamesh_core::AuthenticationState::Authenticated;
-            } else if readiness.reason_code.as_deref() == Some("execution.auth-required") {
-                tool.auth_state = vocamesh_core::AuthenticationState::Unauthenticated;
-            } else if readiness.reason_code.as_deref() == Some("execution.auth-unknown") {
-                tool.auth_state = vocamesh_core::AuthenticationState::Unknown;
-            }
-            match readiness.reason_code.as_deref() {
-                Some("execution.managed-policy-unverified") => {
-                    tool.integration_status = ToolIntegrationStatus::BlockedByPolicy;
-                }
-                Some("execution.platform-unsupported") => {
-                    tool.integration_status = ToolIntegrationStatus::UnsupportedPlatform;
-                }
-                _ => {}
+            tool.auth_state = readiness.auth_state;
+            if readiness.checks.iter().any(|check| {
+                check.id == ExecutionCheckId::Platform
+                    && check.status == ExecutionCheckStatus::Unsupported
+            }) {
+                tool.integration_status = ToolIntegrationStatus::UnsupportedPlatform;
+            } else if readiness.policy_status == ExecutionPolicyStatus::Unverified {
+                tool.integration_status = ToolIntegrationStatus::BlockedByPolicy;
             }
         } else {
             tool.runtime_ready = false;
@@ -108,12 +102,17 @@ pub(crate) async fn scan_tools(
     let scan_generation = Arc::clone(&state.scan_generation);
     let execution = state.execution.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
         if scan_generation.load(Ordering::SeqCst) != generation {
             return Err(ERR_SCAN_SUPERSEDED);
         }
         runtime.scan_tools().map(|tools| {
+            let readiness = execution.as_ref().and_then(|execution| {
+                tools
+                    .iter()
+                    .find(|tool| tool.id == "claude")
+                    .map(|tool| execution.readiness_for_tool(tool))
+            });
             tools
                 .into_iter()
                 .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
@@ -155,11 +154,13 @@ pub(crate) async fn verify_tool(
     let runtime = Arc::clone(&state.runtime);
     let execution = state.execution.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
-        runtime
-            .verify_tool(&id)
-            .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+        runtime.verify_tool(&id).map(|tool| {
+            let readiness = execution
+                .as_ref()
+                .map(|execution| execution.readiness_for_tool(&tool));
+            apply_runtime_readiness(tool, readiness.as_ref())
+        })
     })
     .await
     .map_err(|_| ERR_RUNTIME)?
@@ -174,11 +175,13 @@ pub(crate) async fn set_tool_path(
     let runtime = Arc::clone(&state.runtime);
     let execution = state.execution.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
-        runtime
-            .set_tool_path(&id, &path)
-            .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+        runtime.set_tool_path(&id, &path).map(|tool| {
+            let readiness = execution
+                .as_ref()
+                .map(|execution| execution.readiness_for_tool(&tool));
+            apply_runtime_readiness(tool, readiness.as_ref())
+        })
     })
     .await
     .map_err(|_| ERR_RUNTIME)?
@@ -447,13 +450,7 @@ pub(crate) async fn get_execution_readiness(
     state: State<'_, AppState>,
 ) -> Result<ExecutionReadiness, ServiceError> {
     let Some(runtime) = state.execution.clone() else {
-        return Ok(ExecutionReadiness {
-            ready: false,
-            version: None,
-            auth_state: vocamesh_core::AuthenticationState::Unknown,
-            message: ERR_STORAGE.message.into(),
-            reason_code: Some(ERR_STORAGE.code.into()),
-        });
+        return Ok(ExecutionReadiness::storage_unavailable(ERR_STORAGE.message));
     };
     tauri::async_runtime::spawn_blocking(move || Ok(runtime.readiness()))
         .await
@@ -647,9 +644,12 @@ mod tool_readiness_tests {
         let readiness = ExecutionReadiness {
             ready: false,
             version: Some("2.1.296".into()),
-            auth_state: AuthenticationState::Unknown,
+            auth_state: AuthenticationState::Authenticated,
             message: "policy not verified".into(),
             reason_code: Some("execution.managed-policy-unverified".into()),
+            policy_status: ExecutionPolicyStatus::Unverified,
+            checks: Vec::new(),
+            blockers: Vec::new(),
         };
 
         let tool = apply_runtime_readiness(discovered_claude(), Some(&readiness));
@@ -675,6 +675,9 @@ mod tool_readiness_tests {
             auth_state: AuthenticationState::Authenticated,
             message: "ready".into(),
             reason_code: None,
+            policy_status: ExecutionPolicyStatus::Verified,
+            checks: Vec::new(),
+            blockers: Vec::new(),
         };
         let mut codex = LocalTool::unavailable(Provider::Codex, ToolState::Missing, "test");
         codex.discovery_status = ToolDiscoveryStatus::Found;

@@ -47,3 +47,11 @@
 `./scripts/verify-local.sh` 退出码 0：Rust workspace 88 项测试（Agent 37、Core 3、Tauri 2、Runtime 46）、前端 11 个文件/44 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查全部 PASS。本阶段没有运行任何认证状态命令或真实模型请求。macOS GUI 因缺少完整 Xcode/可验收窗口为 BLOCKED；Windows、Linux、Playwright E2E 和远端 CI 为 NOT RUN。逐项证据与当前分支提交/PR 状态见 `implementation-report.md`。
 
 `pnpm --dir frontend tauri build --bundles app --no-sign` 另行成功生成 macOS `.app` bundle；跳过代码签名，且没有启动窗口，因此不改变 GUI BLOCKED 状态。
+
+## v0.6 认证诊断与执行就绪度
+
+`feature/v0.6-auth-readiness-diagnostics` 基于 `origin/main` 的 `76cafd0266ef15ec88c609eb3e1847b5156670f`。Claude Code 认证解析现在要求 `loggedIn`、`authMethod` 和退出码一致，并将未知格式、超时、失败和参数不兼容分别表达；普通扫描不会触发认证命令。Runtime readiness 返回结构化 checks/blockers，分别展示认证与 managed policy 状态；UI 会清除过期认证成功状态并在策略阻断时保持任务禁用。
+
+本机固定只读 `claude auth status` 探测通过：Claude Code `2.1.296`，退出码 0，JSON object，`loggedIn=true`、`authMethod=oauth_token`。没有发送模型请求。生产 `execution.managed-policy-unverified` 保持 fail-closed；SQLite schema v3、只读执行边界和 Provider 范围未变。
+
+`./scripts/verify-local.sh` 退出码 0：Rust workspace 99 项测试（Agent 40、Core 4、Tauri 2、Runtime 53），前端 11 个文件/47 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查全部 PASS。macOS GUI 因 Computer Use 未获准访问应用为 BLOCKED；Windows、Linux、Playwright E2E、远端 CI 和真实模型任务本轮未运行。实施报告和 ADR 记录逐项证据。

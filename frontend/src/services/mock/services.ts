@@ -7,6 +7,7 @@ import type {
   AppSettings,
   CreateAgentInput,
   CreateTaskInput,
+  ExecutionReadiness,
   LocalTool,
   NotificationItem,
   RunArtifactGroup,
@@ -58,6 +59,27 @@ function statusForTool(state: LocalTool["state"]): AgentState {
 
 /** 演示用延迟：明确不做“假装真实执行”的动画，只用于体现排队/安全边界等状态。 */
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const unsupportedExecutionReadiness = (): ExecutionReadiness => ({
+  ready: false,
+  version: null,
+  authState: "unknown",
+  message: "真实只读执行仅在桌面端提供",
+  reasonCode: "execution.not-supported",
+  policyStatus: "unverified",
+  checks: [
+    { id: "localStorage", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "activeRun", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "processState", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "platform", status: "unsupported", reasonCode: "execution.not-supported" },
+    { id: "cliDiscovery", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "cliVersion", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "authentication", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "managedPolicy", status: "unknown", reasonCode: "execution.not-supported" },
+    { id: "taskStart", status: "blocked", reasonCode: "execution.not-supported" },
+  ],
+  blockers: [{ check: "taskStart", reasonCode: "execution.not-supported" }],
+});
 
 export type MockServices = Services;
 
@@ -627,7 +649,7 @@ export function createMockServices(): Services {
 
   const execution: ExecutionService = {
     async selectWorkspaceDirectory() { return null; },
-    async readiness() { return { ready: false, version: null, authState: "unknown", message: "真实只读执行仅在桌面端提供", reasonCode: "execution.not-supported" }; },
+    async readiness() { return unsupportedExecutionReadiness(); },
     async listUnknownRuns() { return []; },
     async inspectUnknownRun() { throw new ServiceError("恢复检查仅在桌面端提供", "execution.not-supported"); },
     async resolveUnknownRun() { throw new ServiceError("恢复归档仅在桌面端提供", "execution.not-supported"); },

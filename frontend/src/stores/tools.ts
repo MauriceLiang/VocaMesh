@@ -13,6 +13,7 @@ export const useToolsStore = defineStore("tools", () => {
   const tools = ref<LocalTool[]>([]);
   const loading = ref(false);
   const scanning = ref(false);
+  const verifyingToolId = ref<string | null>(null);
   const scanMessage = ref("");
   const defaultToolId = ref<string | null>(null);
   const error = ref<string | null>(null);
@@ -71,6 +72,9 @@ export const useToolsStore = defineStore("tools", () => {
   }
 
   async function verify(id: string): Promise<void> {
+    if (verifyingToolId.value) return;
+    verifyingToolId.value = id;
+    error.value = null;
     try {
       const tool = await services.tools.verifyTool(id);
       tools.value = tools.value.map((item) => (item.id === tool.id ? tool : item));
@@ -80,7 +84,22 @@ export const useToolsStore = defineStore("tools", () => {
         ready ? "success" : "blocked",
       );
     } catch (err) {
-      app.toast(err instanceof ServiceError ? err.message : "工具验证失败", "failure");
+      const message = err instanceof ServiceError ? err.message : "工具验证失败";
+      error.value = message;
+      if (id === "claude") {
+        tools.value = tools.value.map((item) => item.id === id ? {
+          ...item,
+          state: "pending",
+          note: "认证探测调用失败；登录状态保持未知，请重试",
+          authState: "unknown",
+          reasonCode: "execution.auth-probe-failed",
+          runtimeReady: false,
+          runtimeReasonCode: item.runtimeReasonCode ?? "execution.auth-probe-failed",
+        } : item);
+      }
+      app.toast(message, "failure");
+    } finally {
+      verifyingToolId.value = null;
     }
   }
 
@@ -121,6 +140,7 @@ export const useToolsStore = defineStore("tools", () => {
     tools,
     loading,
     scanning,
+    verifyingToolId,
     scanMessage,
     defaultToolId,
     counts,

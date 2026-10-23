@@ -240,7 +240,7 @@ impl<P: ProcessProbe> AgentRuntime<P> {
                     } else if provider == Provider::Claude {
                         crate::process_probe::AuthenticationProbeResult {
                             state: AuthenticationState::Unknown,
-                            reason_code: Some("execution.auth-unknown"),
+                            reason_code: Some("execution.auth-not-verified"),
                         }
                     } else {
                         crate::process_probe::AuthenticationProbeResult {
@@ -268,7 +268,22 @@ impl<P: ProcessProbe> AgentRuntime<P> {
                         Some("tool.version-incompatible") => "CLI 版本低于当前受支持的最低版本",
                         Some("execution.auth-required") => "Claude Code CLI 尚未登录",
                         Some("execution.auth-unknown") => {
-                            "CLI 版本已读取；尚未确认 Claude Code 登录状态"
+                            "认证探测返回有效信息，但无法确认 Claude Code 登录状态"
+                        }
+                        Some("execution.auth-not-verified") => {
+                            "CLI 版本已读取；尚未执行 Claude Code 认证探测"
+                        }
+                        Some("execution.auth-output-unrecognized") => {
+                            "Claude Code 认证输出无法识别，登录状态保持未知"
+                        }
+                        Some("execution.auth-probe-timeout") => {
+                            "Claude Code 认证探测超时，登录状态保持未知"
+                        }
+                        Some("execution.auth-probe-failed") => {
+                            "Claude Code 认证探测失败，登录状态保持未知"
+                        }
+                        Some("execution.auth-cli-incompatible") => {
+                            "当前 Claude Code 版本不支持受控认证探测"
                         }
                         _ => "CLI 版本已读取，认证与 Runtime 就绪状态已分别记录",
                     };
@@ -529,6 +544,10 @@ mod tests {
             .unwrap();
         assert_eq!(scanned.version_status, ToolVersionStatus::Known);
         assert_eq!(scanned.auth_state, AuthenticationState::Unknown);
+        assert_eq!(
+            scanned.reason_code.as_deref(),
+            Some("execution.auth-not-verified")
+        );
         assert_eq!(
             scanned.integration_status,
             ToolIntegrationStatus::AdapterAvailable

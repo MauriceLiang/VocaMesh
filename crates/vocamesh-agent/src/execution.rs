@@ -135,6 +135,9 @@ pub struct ClaudeCli {
 pub enum AuthenticationProbeError {
     Timeout,
     Failed,
+    Unknown,
+    OutputUnrecognized,
+    CliIncompatible,
 }
 
 impl ClaudeCli {
@@ -181,20 +184,32 @@ impl ClaudeCli {
     pub fn authentication_probe_state(
         &self,
     ) -> Result<AuthenticationState, AuthenticationProbeError> {
+        self.authentication_probe_state_with_timeout(AUTH_TIMEOUT)
+    }
+
+    fn authentication_probe_state_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<AuthenticationState, AuthenticationProbeError> {
         let output = capture(
             &self.executable,
             &["auth", "status"],
-            AUTH_TIMEOUT,
+            timeout,
             &self.environment,
         )
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::TimedOut {
                 AuthenticationProbeError::Timeout
+            } else if error.kind() == std::io::ErrorKind::InvalidData {
+                AuthenticationProbeError::OutputUnrecognized
             } else {
                 AuthenticationProbeError::Failed
             }
         })?;
-        Ok(parse_auth_status(output.status.code(), &output.stdout))
+        if classify_cli_stderr(&output.stderr) == CliFailureKind::InvalidArguments {
+            return Err(AuthenticationProbeError::CliIncompatible);
+        }
+        parse_auth_status(output.status.code(), &output.stdout)
     }
 
     pub fn configure_command(&self, command: &mut Command) {
@@ -237,15 +252,35 @@ impl ClaudeCli {
     }
 }
 
-pub fn parse_auth_status(exit_code: Option<i32>, output: &[u8]) -> AuthenticationState {
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(output) else {
-        return AuthenticationState::Unknown;
-    };
-    let method = json.get("authMethod").and_then(serde_json::Value::as_str);
-    match (exit_code, method) {
-        (Some(1), Some("none")) => AuthenticationState::Unauthenticated,
-        (Some(0), Some("claude.ai" | "oauth_token")) => AuthenticationState::Authenticated,
-        _ => AuthenticationState::Unknown,
+pub fn parse_auth_status(
+    exit_code: Option<i32>,
+    output: &[u8],
+) -> Result<AuthenticationState, AuthenticationProbeError> {
+    let json = serde_json::from_slice::<serde_json::Value>(output)
+        .map_err(|_| AuthenticationProbeError::OutputUnrecognized)?;
+    let object = json
+        .as_object()
+        .ok_or(AuthenticationProbeError::OutputUnrecognized)?;
+    let logged_in = object
+        .get("loggedIn")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(AuthenticationProbeError::OutputUnrecognized)?;
+    let auth_method = object
+        .get("authMethod")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(AuthenticationProbeError::OutputUnrecognized)?;
+    let auth_method_known = matches!(
+        auth_method,
+        "none" | "claude.ai" | "oauth_token" | "api_key" | "api_key_helper" | "third_party"
+    );
+    if !auth_method_known || (logged_in == (auth_method == "none")) {
+        return Err(AuthenticationProbeError::OutputUnrecognized);
+    }
+    match exit_code {
+        Some(0) if logged_in => Ok(AuthenticationState::Authenticated),
+        Some(1) if !logged_in => Ok(AuthenticationState::Unauthenticated),
+        Some(0 | 1) => Err(AuthenticationProbeError::OutputUnrecognized),
+        Some(_) | None => Err(AuthenticationProbeError::Unknown),
     }
 }
 
@@ -336,6 +371,7 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 struct Captured {
     status: std::process::ExitStatus,
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 fn capture(
@@ -366,13 +402,13 @@ fn capture(
         .stderr
         .take()
         .ok_or_else(|| std::io::Error::other("stderr unavailable"))?;
-    let (tx, rx) = mpsc::channel();
-    let stdout_tx = tx.clone();
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    let (stderr_tx, stderr_rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = stdout_tx.send(read_capped(stdout, AUTH_OUTPUT_LIMIT));
     });
     thread::spawn(move || {
-        let _ = read_bounded(stderr, STDERR_LIMIT);
+        let _ = stderr_tx.send(read_bounded(stderr, STDERR_LIMIT));
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -389,8 +425,9 @@ fn capture(
         }
         thread::sleep(std::time::Duration::from_millis(10));
     };
-    let stdout = rx
-        .recv_timeout(timeout)
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let stdout = stdout_rx
+        .recv_timeout(remaining)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "CLI output timed out"))?;
     if stdout.len() > AUTH_OUTPUT_LIMIT {
         return Err(std::io::Error::new(
@@ -398,7 +435,15 @@ fn capture(
             "CLI output too large",
         ));
     }
-    Ok(Captured { status, stdout })
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let stderr = stderr_rx
+        .recv_timeout(remaining)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "CLI output timed out"))?;
+    Ok(Captured {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn read_capped<R: std::io::Read>(mut reader: R, limit: usize) -> Vec<u8> {
@@ -508,43 +553,157 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_uses_only_exit_code_and_allowlisted_auth_method() {
+    fn auth_status_requires_consistent_json_fields_and_documented_exit_codes() {
         assert_eq!(
             parse_auth_status(
                 Some(0),
-                br#"{"authMethod":"claude.ai","email":"private@example.test"}"#
+                br#"{"loggedIn":true,"authMethod":"claude.ai","email":"private@example.test"}"#
             ),
-            AuthenticationState::Authenticated
+            Ok(AuthenticationState::Authenticated)
         );
         assert_eq!(
             parse_auth_status(
                 Some(1),
-                br#"{"authMethod":"none","configDirectory":"/private/path"}"#
+                br#"{"loggedIn":false,"authMethod":"none","configDirectory":"/private/path"}"#
             ),
-            AuthenticationState::Unauthenticated
+            Ok(AuthenticationState::Unauthenticated)
         );
-        assert_eq!(
-            parse_auth_status(Some(1), br#"{"authMethod":"claude.ai"}"#),
-            AuthenticationState::Unknown
-        );
-        assert_eq!(
-            parse_auth_status(Some(0), b"invalid"),
-            AuthenticationState::Unknown
-        );
-        assert_eq!(
-            parse_auth_status(Some(0), br#"{"authMethod":"none"}"#),
-            AuthenticationState::Unknown
-        );
-        for method in ["api_key", "api_key_helper", "third_party"] {
-            let output = format!(r#"{{"authMethod":"{method}"}}"#);
+        for method in ["oauth_token", "api_key", "api_key_helper", "third_party"] {
+            let output = format!(r#"{{"loggedIn":true,"authMethod":"{method}"}}"#);
             assert_eq!(
                 parse_auth_status(Some(0), output.as_bytes()),
-                AuthenticationState::Unknown
+                Ok(AuthenticationState::Authenticated)
+            );
+        }
+        for (exit_code, output) in [
+            (
+                Some(0),
+                br#"{"loggedIn":false,"authMethod":"none"}"#.as_slice(),
+            ),
+            (
+                Some(1),
+                br#"{"loggedIn":true,"authMethod":"oauth_token"}"#.as_slice(),
+            ),
+            (
+                Some(0),
+                br#"{"loggedIn":true,"authMethod":"none"}"#.as_slice(),
+            ),
+            (
+                Some(1),
+                br#"{"loggedIn":false,"authMethod":"claude.ai"}"#.as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                parse_auth_status(exit_code, output),
+                Err(AuthenticationProbeError::OutputUnrecognized)
             );
         }
         assert_eq!(
-            parse_auth_status(None, br#"{"authMethod":"claude.ai"}"#),
-            AuthenticationState::Unknown
+            parse_auth_status(Some(2), br#"{"loggedIn":true,"authMethod":"oauth_token"}"#),
+            Err(AuthenticationProbeError::Unknown)
+        );
+        assert_eq!(
+            parse_auth_status(None, br#"{"loggedIn":true,"authMethod":"oauth_token"}"#),
+            Err(AuthenticationProbeError::Unknown)
+        );
+    }
+
+    #[test]
+    fn auth_status_rejects_missing_malformed_and_unknown_fields_without_guessing() {
+        for output in [
+            b"".as_slice(),
+            b"invalid".as_slice(),
+            br#"{"authMethod":"oauth_token"}"#.as_slice(),
+            br#"{"loggedIn":null,"authMethod":"oauth_token"}"#.as_slice(),
+            br#"{"loggedIn":1,"authMethod":"oauth_token"}"#.as_slice(),
+            br#"{"loggedIn":true,"authMethod":null}"#.as_slice(),
+            br#"{"loggedIn":true,"authMethod":"future_auth"}"#.as_slice(),
+            &[0xff, 0xfe],
+        ] {
+            assert_eq!(
+                parse_auth_status(Some(0), output),
+                Err(AuthenticationProbeError::OutputUnrecognized)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_status_reports_cli_compatibility_and_timeout_separately() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fake-claude");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf 'unknown command' >&2; exit 2; fi\nprintf '2.1.296 (Claude Code)\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let cli = ClaudeCli {
+            executable: executable.clone(),
+            version: (2, 1, 296),
+            environment: ExecutionEnvironment::current(),
+        };
+        assert_eq!(
+            cli.authentication_probe_state(),
+            Err(AuthenticationProbeError::CliIncompatible)
+        );
+
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2.1.296 (Claude Code)\\n'; exit 0; fi\nexec /bin/sleep 10\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let cli = ClaudeCli {
+            executable,
+            version: (2, 1, 296),
+            environment: ExecutionEnvironment::current(),
+        };
+        assert_eq!(
+            cli.authentication_probe_state_with_timeout(std::time::Duration::from_millis(30)),
+            Err(AuthenticationProbeError::Timeout)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_status_caps_output_and_classifies_spawn_failure_without_output_text() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fake-claude");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '{\"loggedIn\":true,\"authMethod\":\"oauth_token\"}'\ni=0\nwhile [ \"$i\" -lt 20000 ]; do printf x; i=$((i + 1)); done\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let cli = ClaudeCli {
+            executable,
+            version: (2, 1, 296),
+            environment: ExecutionEnvironment::current(),
+        };
+        assert_eq!(
+            cli.authentication_probe_state(),
+            Err(AuthenticationProbeError::OutputUnrecognized)
+        );
+
+        let cli = ClaudeCli {
+            executable: directory.path().join("missing-claude"),
+            version: (2, 1, 296),
+            environment: ExecutionEnvironment::current(),
+        };
+        assert_eq!(
+            cli.authentication_probe_state(),
+            Err(AuthenticationProbeError::Failed)
         );
     }
 
@@ -621,7 +780,7 @@ if [ "$1" = "--version" ]; then
 fi
 if [ "$1" = "auth" ]; then
   [ "$CLAUDE_CONFIG_DIR" = "{config_value}" ] || exit 21
-  printf '{{"authMethod":"oauth_token"}}\n'
+  printf '{{"loggedIn":true,"authMethod":"oauth_token"}}\n'
   exit 0
 fi
 [ "$CLAUDE_CONFIG_DIR" = "{config_value}" ] || exit 22

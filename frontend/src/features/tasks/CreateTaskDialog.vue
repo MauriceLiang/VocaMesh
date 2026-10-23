@@ -15,7 +15,7 @@ import { useWorkspacesStore } from "@/stores/workspaces";
 import { useTasksStore } from "@/stores/tasks";
 import { useToolsStore } from "@/stores/tools";
 import { useServices } from "@/services/adapters";
-import { toolAuthMeta, toolDiscoveryMeta, toolIntegrationMeta, toolRuntimeMeta, toolVersionMeta } from "@/lib/status";
+import { executionCheckLabel, executionCheckMeta, toolAuthMeta, toolDiscoveryMeta, toolIntegrationMeta, toolRuntimeMeta, toolVersionMeta } from "@/lib/status";
 
 type Mode = CreateTaskInput["mode"];
 
@@ -52,6 +52,10 @@ const nativeWorkspace = ref("");
 const nativeConsent = ref(false);
 const nativeReadiness = ref<ExecutionReadiness | null>(null);
 const nativeLoading = ref(false);
+const nativeAuthMeta = computed(() => toolAuthMeta(
+  nativeReadiness.value?.authState ?? "unknown",
+  nativeReadiness.value?.checks.find((check) => check.id === "authentication")?.reasonCode,
+));
 const nativeTool = computed(() => tools.tools.find((tool) => tool.id === "claude") ?? null);
 const preferredToolName = computed(() => {
   if (!tools.defaultToolId) return "未设置";
@@ -85,7 +89,34 @@ async function prepare(): Promise<void> {
       if (!tools.tools.length) await tools.load();
       nativeReadiness.value = await services.execution.readiness();
     }
-    catch { nativeReadiness.value = { ready: false, version: null, authState: "unknown", message: "无法读取本机执行安全状态", reasonCode: "storage.read-failed" }; }
+    catch {
+      const reasonCode = "storage.read-failed";
+      nativeReadiness.value = {
+        ready: false,
+        version: null,
+        authState: "unknown",
+        message: "无法读取本机执行安全状态",
+        reasonCode,
+        policyStatus: "unverified",
+        checks: [
+          { id: "localStorage", status: "failed", reasonCode },
+          { id: "activeRun", status: "unknown", reasonCode },
+          { id: "processState", status: "unknown", reasonCode },
+          { id: "platform", status: "unknown", reasonCode: "execution.platform-unknown" },
+          { id: "cliDiscovery", status: "unknown", reasonCode: "execution.cli-unknown" },
+          { id: "cliVersion", status: "unknown", reasonCode: "execution.cli-unknown" },
+          { id: "authentication", status: "unknown", reasonCode: "execution.auth-unknown" },
+          { id: "managedPolicy", status: "blocked", reasonCode: "execution.managed-policy-unverified" },
+          { id: "taskStart", status: "blocked", reasonCode },
+        ],
+        blockers: [
+          { check: "localStorage", reasonCode },
+          { check: "activeRun", reasonCode },
+          { check: "processState", reasonCode },
+          { check: "managedPolicy", reasonCode: "execution.managed-policy-unverified" },
+        ],
+      };
+    }
     finally { nativeLoading.value = false; }
     return;
   }
@@ -205,7 +236,7 @@ async function submitNative(): Promise<void> {
           <div v-if="nativeTool" class="flex flex-wrap gap-[6px]">
             <VocaStatus :meta="toolDiscoveryMeta(nativeTool.discoveryStatus)" />
             <VocaStatus :meta="toolVersionMeta(nativeTool.versionStatus)" />
-            <VocaStatus :meta="toolAuthMeta(nativeTool.authState)" />
+            <VocaStatus :meta="toolAuthMeta(nativeTool.authState, nativeTool.reasonCode)" />
             <VocaStatus :meta="toolIntegrationMeta(nativeTool.integrationStatus)" />
             <VocaStatus :meta="toolRuntimeMeta(nativeTool.runtimeReady, nativeTool.runtimeReasonCode)" />
           </div>
@@ -231,6 +262,17 @@ async function submitNative(): Promise<void> {
       <div class="v-banner" :class="nativeReadiness?.ready ? 'is-neutral' : 'is-blocked'">
         <span class="v-tiny">{{ nativeLoading ? '正在检查组织托管策略、CLI 版本与登录状态…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
         <span v-if="nativeReadiness?.reasonCode" class="v-mono v-tiny">{{ nativeReadiness.reasonCode }}</span>
+      </div>
+      <div v-if="nativeReadiness" class="v-card v-panel" :style="{ gap: '7px' }">
+        <span class="v-small">认证与执行策略</span>
+        <span class="v-tiny">认证状态：{{ nativeAuthMeta.label }}。认证未知不等于未登录；已登录也不代表 VocaMesh 当前允许执行。</span>
+        <span v-if="nativeReadiness.authState === 'authenticated' && nativeReadiness.policyStatus === 'unverified'" class="v-tiny">Claude Code 已登录，但执行仍被托管策略阻断。</span>
+        <span v-else-if="nativeReadiness.policyStatus === 'unverified'" class="v-tiny">托管策略尚未核验，执行仍被阻断；这不代表用户未登录。</span>
+        <div v-for="check in nativeReadiness.checks" :key="check.id" class="flex flex-wrap items-center gap-[7px]">
+          <span class="v-tiny">{{ executionCheckLabel(check.id) }}</span>
+          <VocaStatus :meta="executionCheckMeta(check.status)" />
+          <span v-if="check.reasonCode" class="v-mono v-tiny v-muted">{{ check.reasonCode }}</span>
+        </div>
       </div>
       <RuntimeRecoveryPanel v-if="nativeReadiness?.reasonCode === 'execution.process-state-unknown'" />
       <div v-if="optionsError" class="v-banner is-failure"><AlertTriangle :size="13" /><span class="v-tiny">{{ optionsError }}</span></div>

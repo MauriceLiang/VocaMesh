@@ -176,6 +176,17 @@ fn classify_authentication_probe(
             AuthenticationState::Unknown,
             Some("execution.auth-probe-failed"),
         ),
+        Err(AuthenticationProbeError::Unknown) => {
+            (AuthenticationState::Unknown, Some("execution.auth-unknown"))
+        }
+        Err(AuthenticationProbeError::OutputUnrecognized) => (
+            AuthenticationState::Unknown,
+            Some("execution.auth-output-unrecognized"),
+        ),
+        Err(AuthenticationProbeError::CliIncompatible) => (
+            AuthenticationState::Unknown,
+            Some("execution.auth-cli-incompatible"),
+        ),
     };
     AuthenticationProbeResult { state, reason_code }
 }
@@ -261,6 +272,26 @@ mod tests {
         let failed = classify_authentication_probe(Err(AuthenticationProbeError::Failed));
         assert_eq!(failed.state, AuthenticationState::Unknown);
         assert_eq!(failed.reason_code, Some("execution.auth-probe-failed"));
+
+        let unknown = classify_authentication_probe(Err(AuthenticationProbeError::Unknown));
+        assert_eq!(unknown.state, AuthenticationState::Unknown);
+        assert_eq!(unknown.reason_code, Some("execution.auth-unknown"));
+
+        let output =
+            classify_authentication_probe(Err(AuthenticationProbeError::OutputUnrecognized));
+        assert_eq!(output.state, AuthenticationState::Unknown);
+        assert_eq!(
+            output.reason_code,
+            Some("execution.auth-output-unrecognized")
+        );
+
+        let incompatible =
+            classify_authentication_probe(Err(AuthenticationProbeError::CliIncompatible));
+        assert_eq!(incompatible.state, AuthenticationState::Unknown);
+        assert_eq!(
+            incompatible.reason_code,
+            Some("execution.auth-cli-incompatible")
+        );
     }
 
     #[test]
