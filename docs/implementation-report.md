@@ -5,6 +5,7 @@
 ## 基线、分支与环境
 
 - 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.5-local-agent-integration`；基线：`origin/main` / `77d4bb22ac9e6fca8fe6c58e5e0a8e2c8d2a23e2`。
+- 实施提交：`919a95970a6a532f39fb80488989aa7ad6e832cf`；PR [#8](https://github.com/MauriceLiang/VocaMesh/pull/8) 已创建，当前 open、未合并。
 - Claude Code `2.1.296`、Codex CLI `0.162.1`；OpenCode CLI 未安装。只执行版本探测；没有运行 `claude auth status`、`codex login status`、`opencode auth list` 或真实模型任务。
 - macOS 当前只有 Command Line Tools，缺少完整 Xcode；没有可验收的 VocaMesh 原生窗口。无关未跟踪项 `.DS_Store`、`.idea/`、`UI/.write-test`、`crates/.DS_Store`、`docs/.DS_Store` 保持未改动且不会纳入提交。
 
