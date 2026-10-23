@@ -2,8 +2,8 @@ use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
-    ExecutionReadiness, ExecutionRequest, LocalTool, RunEvent, RunRecord, ScanPhase, ServiceError,
-    TaskRecord, ToolScanEvent,
+    ExecutionReadiness, ExecutionRequest, LocalTool, RecoveryInspection, RecoveryResolution,
+    RunEvent, RunRecord, ScanPhase, ServiceError, TaskRecord, ToolScanEvent, UnknownRunSummary,
 };
 use vocamesh_runtime::RuntimeNotification;
 
@@ -158,11 +158,50 @@ pub(crate) async fn get_execution_readiness(
             version: None,
             auth_state: vocamesh_core::AuthenticationState::Unknown,
             message: ERR_STORAGE.message.into(),
+            reason_code: Some(ERR_STORAGE.code.into()),
         });
     };
     tauri::async_runtime::spawn_blocking(move || Ok(runtime.readiness()))
         .await
         .map_err(|_| ERR_RUNTIME)?
+}
+
+#[tauri::command]
+pub(crate) async fn list_unknown_runs(
+    state: State<'_, AppState>,
+) -> Result<Vec<UnknownRunSummary>, ServiceError> {
+    let runtime = state.execution.clone().ok_or(ERR_STORAGE)?;
+    tauri::async_runtime::spawn_blocking(move || runtime.list_unknown_runs())
+        .await
+        .map_err(|_| ERR_RUNTIME)?
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_unknown_run(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<RecoveryInspection, ServiceError> {
+    let runtime = state.execution.clone().ok_or(ERR_STORAGE)?;
+    tauri::async_runtime::spawn_blocking(move || runtime.inspect_unknown_run(&run_id))
+        .await
+        .map_err(|_| ERR_RUNTIME)?
+}
+
+#[tauri::command]
+pub(crate) async fn resolve_unknown_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+    user_confirmed: bool,
+) -> Result<RecoveryResolution, ServiceError> {
+    let runtime = state.execution.clone().ok_or(ERR_STORAGE)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolution = runtime.resolve_unknown_run(&run_id, user_confirmed)?;
+        let _ = app.emit("run://state", resolution.run.clone());
+        Ok(resolution)
+    })
+    .await
+    .map_err(|_| ERR_RUNTIME)?
 }
 
 #[tauri::command]
