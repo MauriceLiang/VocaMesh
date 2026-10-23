@@ -90,6 +90,49 @@ describe("tools store", () => {
     expect(store.counts.authPending).toBe(0);
   });
 
+  it("keeps ordinary scans separate from active auth verification", async () => {
+    const verifyTool = vi.fn();
+    const scanned = { ...tool("claude", "pending"), reasonCode: "execution.auth-not-verified" };
+    installServices({
+      scanTools: vi.fn().mockResolvedValue([scanned]),
+      getDefaultToolId: vi.fn().mockResolvedValue(null),
+      verifyTool,
+    });
+    setActivePinia(createPinia());
+    const store = useToolsStore();
+
+    await store.load();
+
+    expect(verifyTool).not.toHaveBeenCalled();
+    expect(store.tools[0]?.authState).toBe("unknown");
+    expect(store.tools[0]?.reasonCode).toBe("execution.auth-not-verified");
+  });
+
+  it("serializes active verification and clears stale success after an IPC failure", async () => {
+    const verifyTool = vi.fn().mockRejectedValue(new Error("private IPC detail"));
+    installServices({ verifyTool });
+    setActivePinia(createPinia());
+    const store = useToolsStore();
+    store.tools = [{
+      ...tool("claude", "ready"),
+      authState: "authenticated",
+      runtimeReady: true,
+      reasonCode: null,
+    }];
+
+    const first = store.verify("claude");
+    expect(store.verifyingToolId).toBe("claude");
+    await store.verify("codex");
+    await first;
+
+    expect(verifyTool).toHaveBeenCalledTimes(1);
+    expect(store.verifyingToolId).toBeNull();
+    expect(store.tools[0]?.authState).toBe("unknown");
+    expect(store.tools[0]?.reasonCode).toBe("execution.auth-probe-failed");
+    expect(store.tools[0]?.runtimeReady).toBe(false);
+    expect(store.error).toBe("工具验证失败");
+  });
+
   it("allows an eligible adapter to be preferred while Runtime remains blocked", async () => {
     const setDefault = vi.fn();
     installServices({ setDefaultTool: setDefault });

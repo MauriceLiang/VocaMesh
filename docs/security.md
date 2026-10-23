@@ -14,7 +14,7 @@ Claude claude auth status 认证状态只基于官方规定的 JSON authMethod �
 
 发现、版本、认证、适配器能力和 Runtime readiness 是独立字段。已发现或已认证都不会授权执行；只有 Runtime readiness 可控制任务入口，且 `execution.managed-policy-unverified` 仍在生产默认值与启动入口生效。Codex/OpenCode 的认证探测未建立，因此界面明确显示 unsupported/unknown。浏览器 Mock 不覆盖 Tauri 本机状态。
 
-依据官方 CLI 文档的认证命令没有符合 VocaMesh 机器可读与凭据最小访问要求的稳定契约，本阶段不调用这些命令，不读取凭据内容，也不以模型请求验证登录状态。具体调研依据和待决路线记录在 [ADR 0001](adr/0001-agent-execution-boundary.md) 与实现报告中。
+v0.6 已核实 Claude Code 官方 `auth status` JSON 字段/退出码契约，并在本机用固定 `claude auth status`、清理环境、超时和输出上限完成一次只读探测。只记录版本、退出状态类别、JSON 格式类别、`loggedIn`/`authMethod` 的分类结果与稳定原因码；不记录原始输出、邮箱、组织标识或配置路径，不读取凭据正文，也不以模型请求验证登录状态。Codex/OpenCode 认证命令仍未运行。官方契约与决策记录见 [ADR 0001](adr/0001-agent-execution-boundary.md) 和实现报告。
 
 ## 当前真实执行门禁
 
@@ -28,7 +28,7 @@ VocaMesh 不读取完整管理配置、认证文件、令牌、Cookie、钥匙�
 
 未来只有当策略、CLI 版本和认证检查全部通过后，桌面 UI 才允许用户确认目录、只读范围与数据发送并启动任务。届时 Prompt、被读取的文件和输出会由本机 Claude Code CLI 发送至用户配置的模型提供方。Prompt、结果和规范化目录路径会保存在本机应用数据；不要在 Prompt 中放入密码或 Token。当前策略门禁未通过时不会创建 Task/Run，也不会传送这些数据。
 
-认证探测只解析允许的 `authMethod` 与退出码。CLI 版本探测、认证探测和任务执行使用同一份清理后环境，只继承 `PATH`、用户目录、临时目录、locale、终端标识与 `CLAUDE_CONFIG_DIR`；其他变量（包括任意 API key/helper 环境变量）不会传入子进程。
+认证探测只解析 JSON 中的布尔 `loggedIn`、已知 `authMethod` 与退出码，并验证三者一致。字段缺失、类型错误、未知方法、矛盾、畸形输出或不能判断的退出状态不会映射为已认证；失败也会覆盖旧的成功状态。CLI 版本探测、认证探测和任务执行使用同一份清理后环境，只继承 `PATH`、用户目录、临时目录、locale、终端标识与 `CLAUDE_CONFIG_DIR`；其他变量（包括任意 API key/helper 环境变量）不会传入子进程。普通工具扫描不运行认证命令；只有主动验证或显式完整 readiness 预检才执行固定认证探测。
 
 ## 只读工作区快照
 

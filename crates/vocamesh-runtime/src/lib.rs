@@ -26,10 +26,13 @@ use vocamesh_agent::{
 };
 use vocamesh_core::{
     AddTeamMemberInput, AgentRole, AppearanceSettings, AuthenticationState, CatalogStatus,
-    CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness, ExecutionRequest,
-    ProcessGroupStatus, Provider, RecoveryInspection, RecoveryResolution, RecoveryStatus, RunEvent,
-    RunRecord, RunState, ServiceError, SnapshotStatus, TaskRecord, TeamRecord, UnknownRunSummary,
-    UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput, WorkspaceRecord,
+    CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionBlocker, ExecutionCheck,
+    ExecutionCheckId, ExecutionCheckStatus, ExecutionPolicyStatus, ExecutionReadiness,
+    ExecutionRequest, LocalTool, ProcessGroupStatus, Provider, RecoveryInspection,
+    RecoveryResolution, RecoveryStatus, RunEvent, RunRecord, RunState, ServiceError,
+    SnapshotStatus, TaskRecord, TeamRecord, ToolDiscoveryStatus, ToolVersionStatus,
+    UnknownRunSummary, UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput,
+    WorkspaceRecord,
 };
 
 #[cfg(windows)]
@@ -54,6 +57,10 @@ const ERR_RUNNING: ServiceError =
 const ERR_PROCESS_UNKNOWN: ServiceError = ServiceError::new(
     "execution.process-state-unknown",
     "先前 Claude Code 进程状态无法确认；为避免重复启动，真实执行已暂停",
+);
+const ERR_POLICY_UNVERIFIED: ServiceError = ServiceError::new(
+    "execution.managed-policy-unverified",
+    "无法确认 Claude Code 的组织托管 Hook 是否会产生额外副作用；真实执行已禁用",
 );
 const ERR_CODEX_POLICY_UNVERIFIED: ServiceError = ServiceError::new(
     "execution.codex-safety-unverified",
@@ -162,86 +169,258 @@ impl ExecutionRuntime {
     }
 
     pub fn readiness_for(&self, provider: Provider) -> ExecutionReadiness {
-        let store = match self.store.lock() {
-            Ok(store) => store,
-            Err(_) => return not_ready("storage.read-failed", "本地任务历史无法读取"),
-        };
-        let uncertain = match store.has_uncertain_process() {
-            Ok(value) => value,
-            Err(error) => return not_ready(error.code, error.message),
-        };
-        let active = match store.has_active() {
-            Ok(value) => value,
-            Err(error) => return not_ready(error.code, error.message),
-        };
-        if uncertain {
-            return not_ready(
-                "execution.process-state-unknown",
-                "先前进程状态无法确认；为避免重复启动，真实执行已暂停",
-            );
-        }
-        if active {
-            return not_ready(
-                "execution.already-running",
-                "本机 Run 尚未完成状态核对；真实执行已暂停",
-            );
+        #[cfg(not(windows))]
+        {
+            let result = AgentRuntime::new(self.config_dir.clone()).verify_tool(provider.id());
+            self.readiness_from_tool_result(provider, result)
         }
         #[cfg(windows)]
         {
-            return ExecutionReadiness {
-                ready: false,
-                version: None,
-                auth_state: AuthenticationState::Unknown,
-                message: "Windows 进程树停止策略尚未通过验证，真实执行暂不可用".into(),
-                reason_code: Some("execution.platform-unsupported".into()),
-            };
+            self.readiness_from_tool_result(provider, Err(ERR_CLI))
         }
+    }
+
+    /// Build diagnostics from an already completed discovery or verification pass.
+    /// A regular tool scan passes its unverified auth state; this method never probes a CLI.
+    pub fn readiness_for_tool(&self, tool: &LocalTool) -> ExecutionReadiness {
+        let provider = tool.id.parse::<Provider>().unwrap_or(Provider::Opencode);
+        self.readiness_from_tool_result(provider, Ok(tool.clone()))
+    }
+
+    fn readiness_from_tool_result(
+        &self,
+        provider: Provider,
+        tool_result: Result<LocalTool, ServiceError>,
+    ) -> ExecutionReadiness {
+        let mut checks = Vec::with_capacity(9);
+        let mut blockers = Vec::with_capacity(8);
+        let (active, uncertain) = match self.store.lock() {
+            Ok(store) => (
+                store.has_active().map_err(|error| error.code),
+                store.has_uncertain_process().map_err(|error| error.code),
+            ),
+            Err(_) => (Err("storage.read-failed"), Err("storage.read-failed")),
+        };
+        let storage_ok = active.is_ok() && uncertain.is_ok();
+        append_execution_check(
+            &mut checks,
+            &mut blockers,
+            ExecutionCheckId::LocalStorage,
+            if storage_ok {
+                ExecutionCheckStatus::Passed
+            } else {
+                ExecutionCheckStatus::Failed
+            },
+            (!storage_ok).then_some("storage.read-failed"),
+        );
+        append_execution_check(
+            &mut checks,
+            &mut blockers,
+            ExecutionCheckId::ActiveRun,
+            match active {
+                Ok(false) => ExecutionCheckStatus::Passed,
+                Ok(true) => ExecutionCheckStatus::Blocked,
+                Err(_) => ExecutionCheckStatus::Unknown,
+            },
+            match active {
+                Ok(false) => None,
+                Ok(true) => Some("execution.already-running"),
+                Err(code) => Some(code),
+            },
+        );
+        append_execution_check(
+            &mut checks,
+            &mut blockers,
+            ExecutionCheckId::ProcessState,
+            match uncertain {
+                Ok(false) => ExecutionCheckStatus::Passed,
+                Ok(true) => ExecutionCheckStatus::Blocked,
+                Err(_) => ExecutionCheckStatus::Unknown,
+            },
+            match uncertain {
+                Ok(false) => None,
+                Ok(true) => Some("execution.process-state-unknown"),
+                Err(code) => Some(code),
+            },
+        );
+
+        #[cfg(windows)]
+        let platform_status = ExecutionCheckStatus::Unsupported;
         #[cfg(not(windows))]
-        {
-            if provider == Provider::Codex {
-                return not_ready_with_auth(
-                    ERR_CODEX_POLICY_UNVERIFIED.code,
-                    ERR_CODEX_POLICY_UNVERIFIED.message,
-                    AuthenticationState::Unsupported,
+        let platform_status = ExecutionCheckStatus::Passed;
+        append_execution_check(
+            &mut checks,
+            &mut blockers,
+            ExecutionCheckId::Platform,
+            platform_status,
+            if cfg!(windows) {
+                Some("execution.platform-unsupported")
+            } else {
+                None
+            },
+        );
+
+        let (version, auth_state) = match tool_result {
+            Ok(tool) => {
+                let discovery_reason = match tool.discovery_status {
+                    ToolDiscoveryStatus::Found => None,
+                    ToolDiscoveryStatus::Missing => Some("execution.cli-not-found"),
+                    ToolDiscoveryStatus::PathInvalid => Some("execution.cli-discovery-failed"),
+                    ToolDiscoveryStatus::ProbeFailed => Some(
+                        tool.reason_code
+                            .as_deref()
+                            .unwrap_or("execution.cli-probe-failed"),
+                    ),
+                };
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::CliDiscovery,
+                    if tool.discovery_status == ToolDiscoveryStatus::Found {
+                        ExecutionCheckStatus::Passed
+                    } else if tool.discovery_status == ToolDiscoveryStatus::ProbeFailed {
+                        ExecutionCheckStatus::Failed
+                    } else {
+                        ExecutionCheckStatus::Blocked
+                    },
+                    discovery_reason,
                 );
-            }
-            if let Err(error) =
-                provider_policy::evaluate(provider, self.managed_policy_is_verified())
-            {
-                return not_ready(error.code, error.message);
-            }
-            let environment = ExecutionEnvironment::current_for(provider);
-            let tools = AgentRuntime::new(self.config_dir.clone());
-            let Ok(path) = tools.executable_path(provider) else {
-                return not_ready("execution.cli-not-found", "未找到受支持的 Provider CLI");
-            };
-            let Ok(runner) = runner_for(provider, path, environment) else {
-                return not_ready(
-                    "execution.cli-incompatible",
-                    "Provider CLI 版本或安全参数不兼容",
+                let version_reason = match tool.version_status {
+                    ToolVersionStatus::Known => None,
+                    ToolVersionStatus::Incompatible => Some("execution.cli-incompatible"),
+                    ToolVersionStatus::Unknown => Some(
+                        tool.reason_code
+                            .as_deref()
+                            .filter(|code| code.starts_with("tool."))
+                            .unwrap_or("execution.cli-version-unknown"),
+                    ),
+                };
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::CliVersion,
+                    match tool.version_status {
+                        ToolVersionStatus::Known => ExecutionCheckStatus::Passed,
+                        ToolVersionStatus::Incompatible => ExecutionCheckStatus::Blocked,
+                        ToolVersionStatus::Unknown => ExecutionCheckStatus::Unknown,
+                    },
+                    version_reason,
                 );
-            };
-            let auth_state = runner.probe().unwrap_or(AuthenticationState::Unknown);
-            let ready = auth_state == AuthenticationState::Authenticated;
-            let reason_code = match auth_state {
-                AuthenticationState::Authenticated => None,
-                AuthenticationState::Unauthenticated => Some("execution.auth-required".into()),
-                AuthenticationState::Unknown | AuthenticationState::Unsupported => {
-                    Some("execution.auth-unknown".into())
-                }
-            };
-            let message = match auth_state {
-                AuthenticationState::Authenticated => "Claude Code CLI 已登录，可开始单次只读任务",
-                AuthenticationState::Unauthenticated => "Claude Code CLI 未登录，请先在 CLI 中登录",
-                _ => "无法确认 Provider 登录状态，已阻止执行",
-            };
-            ExecutionReadiness {
-                ready,
-                version: runner.version(),
-                auth_state,
-                message: message.into(),
-                reason_code,
+                let auth_reason = match tool.auth_state {
+                    AuthenticationState::Authenticated => None,
+                    AuthenticationState::Unauthenticated => Some("execution.auth-required"),
+                    AuthenticationState::Unsupported => Some("execution.auth-unsupported"),
+                    AuthenticationState::Unknown => Some(
+                        tool.reason_code
+                            .as_deref()
+                            .filter(|code| code.starts_with("execution.auth-"))
+                            .unwrap_or("execution.auth-unknown"),
+                    ),
+                };
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::Authentication,
+                    match tool.auth_state {
+                        AuthenticationState::Authenticated => ExecutionCheckStatus::Passed,
+                        AuthenticationState::Unauthenticated => ExecutionCheckStatus::Blocked,
+                        AuthenticationState::Unsupported => ExecutionCheckStatus::Unsupported,
+                        AuthenticationState::Unknown => ExecutionCheckStatus::Unknown,
+                    },
+                    auth_reason,
+                );
+                (
+                    (tool.version_status == ToolVersionStatus::Known).then_some(tool.version),
+                    tool.auth_state,
+                )
             }
+            Err(error) => {
+                let discovery_reason = match error.code {
+                    "tool.not-found" => "execution.cli-not-found",
+                    "settings.read-failed" => "settings.read-failed",
+                    _ => "execution.cli-discovery-failed",
+                };
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::CliDiscovery,
+                    ExecutionCheckStatus::Failed,
+                    Some(discovery_reason),
+                );
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::CliVersion,
+                    ExecutionCheckStatus::Unknown,
+                    Some(discovery_reason),
+                );
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::Authentication,
+                    ExecutionCheckStatus::Unknown,
+                    Some("execution.auth-unknown"),
+                );
+                (None, AuthenticationState::Unknown)
+            }
+        };
+
+        let policy_error = if provider == Provider::Codex && self.test_codex_policy_allowed() {
+            None
+        } else {
+            provider_policy::evaluate(provider, self.managed_policy_is_verified()).err()
+        };
+        let policy_status = match policy_error {
+            Some(error) => {
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::ManagedPolicy,
+                    ExecutionCheckStatus::Blocked,
+                    Some(error.code),
+                );
+                ExecutionPolicyStatus::Unverified
+            }
+            None => {
+                append_execution_check(
+                    &mut checks,
+                    &mut blockers,
+                    ExecutionCheckId::ManagedPolicy,
+                    ExecutionCheckStatus::Passed,
+                    None,
+                );
+                ExecutionPolicyStatus::Verified
+            }
+        };
+        let ready = blockers.is_empty();
+        let reason_code = if ready {
+            None
+        } else {
+            blockers
+                .iter()
+                .find(|blocker| blocker.check == ExecutionCheckId::ManagedPolicy)
+                .or_else(|| blockers.first())
+                .map(|blocker| blocker.reason_code.clone())
+        };
+        let message = readiness_message(reason_code.as_deref());
+        checks.push(ExecutionCheck {
+            id: ExecutionCheckId::TaskStart,
+            status: if ready {
+                ExecutionCheckStatus::Passed
+            } else {
+                ExecutionCheckStatus::Blocked
+            },
+            reason_code: reason_code.clone(),
+        });
+        ExecutionReadiness {
+            ready,
+            version,
+            auth_state,
+            message: message.to_owned(),
+            reason_code,
+            policy_status,
+            checks,
+            blockers,
         }
     }
 
@@ -1493,21 +1672,56 @@ fn valid_request_id(value: &str) -> bool {
             .all(|(i, c)| [8, 13, 18, 23].contains(&i) || c.is_ascii_hexdigit())
 }
 
-fn not_ready(reason_code: &str, message: &str) -> ExecutionReadiness {
-    not_ready_with_auth(reason_code, message, AuthenticationState::Unknown)
+fn append_execution_check(
+    checks: &mut Vec<ExecutionCheck>,
+    blockers: &mut Vec<ExecutionBlocker>,
+    id: ExecutionCheckId,
+    status: ExecutionCheckStatus,
+    reason_code: Option<&str>,
+) {
+    let reason_code = reason_code.map(str::to_owned);
+    checks.push(ExecutionCheck {
+        id,
+        status,
+        reason_code: reason_code.clone(),
+    });
+    if status != ExecutionCheckStatus::Passed {
+        blockers.push(ExecutionBlocker {
+            check: id,
+            reason_code: reason_code.unwrap_or_else(|| "execution.check-unknown".into()),
+        });
+    }
 }
 
-fn not_ready_with_auth(
-    reason_code: &str,
-    message: &str,
-    auth_state: AuthenticationState,
-) -> ExecutionReadiness {
-    ExecutionReadiness {
-        ready: false,
-        version: None,
-        auth_state,
-        message: message.into(),
-        reason_code: Some(reason_code.into()),
+fn readiness_message(reason_code: Option<&str>) -> &'static str {
+    match reason_code {
+        None => "Provider 已认证，所有 Runtime 硬门禁均已通过",
+        Some("storage.read-failed") => "本地任务历史无法读取，已阻止执行",
+        Some("execution.process-state-unknown") => {
+            "先前进程状态无法确认；为避免重复启动，真实执行已暂停"
+        }
+        Some("execution.already-running") => "本机 Run 尚未完成状态核对；真实执行已暂停",
+        Some("execution.platform-unsupported") => {
+            "当前平台的进程安全策略未通过验证，真实执行暂不可用"
+        }
+        Some("execution.cli-not-found") => "未找到受支持的 Claude Code CLI",
+        Some("execution.cli-discovery-failed") => "Claude Code CLI 发现检查失败",
+        Some("execution.cli-version-unknown") => "Claude Code CLI 版本输出无法确认",
+        Some("execution.cli-incompatible") => "Claude Code CLI 版本不兼容",
+        Some("execution.auth-required") => "Claude Code CLI 尚未登录，请先完成登录",
+        Some("execution.auth-not-verified") => "尚未执行 Claude Code 认证探测",
+        Some("execution.auth-output-unrecognized") => {
+            "Claude Code 认证输出无法识别，登录状态保持未知"
+        }
+        Some("execution.auth-probe-timeout") => "Claude Code 认证探测超时，登录状态保持未知",
+        Some("execution.auth-probe-failed") => "Claude Code 认证探测失败，登录状态保持未知",
+        Some("execution.auth-cli-incompatible") => "当前 Claude Code 版本不支持受控认证探测",
+        Some("execution.auth-unknown") => "无法确认 Claude Code 登录状态，已阻止执行",
+        Some("execution.auth-unsupported") => "当前 Provider 不支持安全认证探测",
+        Some("execution.managed-policy-unverified") => ERR_POLICY_UNVERIFIED.message,
+        Some("execution.codex-safety-unverified") => ERR_CODEX_POLICY_UNVERIFIED.message,
+        Some("execution.cli-probe-failed") => "Claude Code CLI 预检失败",
+        Some(_) => "Runtime 检查未通过，真实执行已阻止",
     }
 }
 
@@ -1579,6 +1793,7 @@ mod tests {
     use std::io::Read;
     use std::process::Command;
     use tempfile::tempdir;
+    use vocamesh_core::ToolState;
 
     #[cfg(unix)]
     static FAKE_CLI_TEST_GATE: Mutex<()> = Mutex::new(());
@@ -1633,6 +1848,20 @@ mod tests {
         }
     }
 
+    fn preflight_tool(auth_state: AuthenticationState, reason_code: Option<&str>) -> LocalTool {
+        let mut tool = LocalTool::unavailable(
+            Provider::Claude,
+            ToolState::Undetectable,
+            "synthetic diagnostic fixture",
+        );
+        tool.discovery_status = ToolDiscoveryStatus::Found;
+        tool.version_status = ToolVersionStatus::Known;
+        tool.version = "2.1.296".into();
+        tool.auth_state = auth_state;
+        tool.reason_code = reason_code.map(str::to_owned);
+        tool
+    }
+
     #[cfg(unix)]
     fn fake_runtime(root: &std::path::Path) -> ExecutionRuntime {
         fake_runtime_with_timeout(root, RUN_TIMEOUT)
@@ -1657,7 +1886,7 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  printf '{"authMethod":"oauth_token"}\n'
+  printf '{"loggedIn":true,"authMethod":"oauth_token"}\n'
   exit 0
 fi
 case "$*" in
@@ -1912,10 +2141,8 @@ exit 2
     fn managed_policy_uncertainty_blocks_readiness_and_task_start() {
         let root = tempdir().unwrap();
         let workspace = tempdir().unwrap();
-        let config = root.path().join("config");
-        let data = root.path().join("data");
-        std::fs::create_dir(&config).unwrap();
-        let runtime = ExecutionRuntime::open_with_timeout(config, data, RUN_TIMEOUT).unwrap();
+        let mut runtime = fake_runtime(root.path());
+        runtime.managed_policy = ManagedPolicyStatus::Unverified;
 
         let readiness = runtime.readiness();
         assert!(!readiness.ready);
@@ -1923,12 +2150,189 @@ exit 2
             readiness.reason_code.as_deref(),
             Some("execution.managed-policy-unverified")
         );
-        assert_eq!(readiness.auth_state, AuthenticationState::Unknown);
+        assert_eq!(readiness.auth_state, AuthenticationState::Authenticated);
+        assert_eq!(readiness.policy_status, ExecutionPolicyStatus::Unverified);
+        assert!(readiness.checks.iter().any(|check| {
+            check.id == ExecutionCheckId::Authentication
+                && check.status == ExecutionCheckStatus::Passed
+        }));
+        assert!(readiness.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::ManagedPolicy
+                && blocker.reason_code == "execution.managed-policy-unverified"
+        }));
         assert!(readiness.message.contains("托管 Hook"));
         let error = runtime
             .start_read_only_task(
                 runtime_request(
                     "00000000-0000-4000-8000-000000000190",
+                    workspace.path(),
+                    "synthetic prompt",
+                ),
+                |_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "execution.managed-policy-unverified");
+        assert!(runtime.list_tasks().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_collects_auth_and_policy_blockers_without_short_circuiting() {
+        let root = tempdir().unwrap();
+        let mut runtime = fake_runtime(root.path());
+        runtime.managed_policy = ManagedPolicyStatus::Unverified;
+
+        let unauthenticated = runtime.readiness_for_tool(&preflight_tool(
+            AuthenticationState::Unauthenticated,
+            Some("execution.auth-required"),
+        ));
+        assert!(!unauthenticated.ready);
+        assert_eq!(
+            unauthenticated.auth_state,
+            AuthenticationState::Unauthenticated
+        );
+        assert!(unauthenticated.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::Authentication
+                && blocker.reason_code == "execution.auth-required"
+        }));
+        assert!(unauthenticated.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::ManagedPolicy
+                && blocker.reason_code == "execution.managed-policy-unverified"
+        }));
+
+        let timeout = runtime.readiness_for_tool(&preflight_tool(
+            AuthenticationState::Unknown,
+            Some("execution.auth-probe-timeout"),
+        ));
+        let auth_check = timeout
+            .checks
+            .iter()
+            .find(|check| check.id == ExecutionCheckId::Authentication)
+            .unwrap();
+        assert_eq!(auth_check.status, ExecutionCheckStatus::Unknown);
+        assert_eq!(
+            auth_check.reason_code.as_deref(),
+            Some("execution.auth-probe-timeout")
+        );
+        assert!(timeout
+            .blockers
+            .iter()
+            .any(|blocker| { blocker.check == ExecutionCheckId::ManagedPolicy }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_reports_cli_missing_and_policy_as_separate_blockers() {
+        let root = tempdir().unwrap();
+        let mut runtime = fake_runtime(root.path());
+        runtime.managed_policy = ManagedPolicyStatus::Unverified;
+        let missing = LocalTool::unavailable(
+            Provider::Claude,
+            ToolState::Missing,
+            "synthetic missing CLI",
+        );
+
+        let readiness = runtime.readiness_for_tool(&missing);
+        assert!(readiness.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::CliDiscovery
+                && blocker.reason_code == "execution.cli-not-found"
+        }));
+        assert!(readiness.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::ManagedPolicy
+                && blocker.reason_code == "execution.managed-policy-unverified"
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_passes_only_with_test_policy_and_all_preflight_checks() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+
+        let readiness = runtime.readiness();
+        assert!(readiness.ready);
+        assert_eq!(readiness.policy_status, ExecutionPolicyStatus::Verified);
+        assert!(readiness.blockers.is_empty());
+        assert!(readiness.checks.iter().all(|check| {
+            check.id == ExecutionCheckId::TaskStart || check.status == ExecutionCheckStatus::Passed
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_keeps_unknown_auth_blocking_when_test_policy_is_verified() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+
+        let readiness = runtime.readiness_for_tool(&preflight_tool(
+            AuthenticationState::Unknown,
+            Some("execution.auth-probe-timeout"),
+        ));
+        assert!(!readiness.ready);
+        assert_eq!(readiness.policy_status, ExecutionPolicyStatus::Verified);
+        assert_eq!(readiness.auth_state, AuthenticationState::Unknown);
+        assert!(readiness.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::Authentication
+                && blocker.reason_code == "execution.auth-probe-timeout"
+        }));
+        assert!(!readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.check == ExecutionCheckId::ManagedPolicy));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_keeps_unknown_run_blocking_when_authentication_passes() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let (_run, _snapshot) = unknown_run_with_group(
+            &runtime,
+            "00000000-0000-4000-8000-000000000196",
+            42_496,
+            None,
+        );
+
+        let readiness =
+            runtime.readiness_for_tool(&preflight_tool(AuthenticationState::Authenticated, None));
+        assert!(!readiness.ready);
+        assert_eq!(readiness.auth_state, AuthenticationState::Authenticated);
+        assert!(readiness.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::ProcessState
+                && blocker.reason_code == "execution.process-state-unknown"
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_keeps_active_run_blocking_when_authentication_passes() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        pending_running_run(&runtime, "00000000-0000-4000-8000-000000000198", 42_498);
+
+        let readiness =
+            runtime.readiness_for_tool(&preflight_tool(AuthenticationState::Authenticated, None));
+        assert!(!readiness.ready);
+        assert_eq!(readiness.auth_state, AuthenticationState::Authenticated);
+        assert!(readiness.blockers.iter().any(|blocker| {
+            blocker.check == ExecutionCheckId::ActiveRun
+                && blocker.reason_code == "execution.already-running"
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_start_rechecks_policy_after_a_ready_diagnostic() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let mut runtime = fake_runtime(root.path());
+        assert!(runtime.readiness().ready);
+        runtime.managed_policy = ManagedPolicyStatus::Unverified;
+
+        let error = runtime
+            .start_read_only_task(
+                runtime_request(
+                    "00000000-0000-4000-8000-000000000197",
                     workspace.path(),
                     "synthetic prompt",
                 ),

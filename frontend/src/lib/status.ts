@@ -1,6 +1,8 @@
 import type {
   ApprovalState,
   AgentState,
+  ExecutionCheckId,
+  ExecutionCheckStatus,
   RunState,
   SubtaskState,
   TaskState,
@@ -93,13 +95,80 @@ export const toolVersionMeta = (state: ToolVersionStatus): StatusMeta => {
   }
 };
 
-export const toolAuthMeta = (state: ToolAuthState): StatusMeta => {
+export const toolAuthMeta = (state: ToolAuthState, reasonCode?: string | null): StatusMeta => {
   switch (state) {
     case "authenticated": return { label: "已登录", tone: "success", icon: "check" };
     case "unauthenticated": return { label: "未登录", tone: "blocked", icon: "alert" };
-    case "unknown": return { label: "登录状态未知", tone: "unknown", icon: "help" };
+    case "unknown":
+      switch (reasonCode) {
+        case "execution.auth-not-verified": return { label: "尚未验证认证", tone: "neutral", icon: "dot" };
+        case "execution.auth-output-unrecognized": return { label: "认证输出无法识别", tone: "unknown", icon: "help" };
+        case "execution.auth-probe-timeout": return { label: "认证探测超时", tone: "blocked", icon: "alert" };
+        case "execution.auth-probe-failed": return { label: "认证探测失败", tone: "failure", icon: "x" };
+        case "execution.auth-cli-incompatible": return { label: "认证探测不兼容", tone: "failure", icon: "x" };
+        default: return { label: "登录状态未知", tone: "unknown", icon: "help" };
+      }
     case "unsupported": return { label: "未支持认证探测", tone: "neutral", icon: "dot" };
   }
+};
+
+export const executionCheckLabel = (id: ExecutionCheckId): string => {
+  switch (id) {
+    case "localStorage": return "本地存储";
+    case "activeRun": return "活动 Run";
+    case "processState": return "进程状态";
+    case "platform": return "平台支持";
+    case "cliDiscovery": return "CLI 发现";
+    case "cliVersion": return "CLI 版本";
+    case "authentication": return "Provider 认证";
+    case "managedPolicy": return "托管策略";
+    case "taskStart": return "任务启动许可";
+  }
+};
+
+export const executionCheckMeta = (status: ExecutionCheckStatus): StatusMeta => {
+  switch (status) {
+    case "passed": return { label: "通过", tone: "success", icon: "check" };
+    case "failed": return { label: "失败", tone: "failure", icon: "x" };
+    case "blocked": return { label: "阻断", tone: "blocked", icon: "alert" };
+    case "unknown": return { label: "未知", tone: "unknown", icon: "help" };
+    case "unsupported": return { label: "不支持", tone: "failure", icon: "x" };
+  }
+};
+
+export const executionReasonText = (code: string | null): string => {
+  if (!code) return "无额外阻断原因";
+  const labels: Record<string, string> = {
+    "execution.managed-policy-unverified": "当前组织托管执行策略尚未核验",
+    "execution.codex-safety-unverified": "Codex 的配置、凭据、文件、进程和网络安全边界尚未证明",
+    "execution.platform-unsupported": "当前平台的进程安全策略未通过验证",
+    "execution.auth-required": "Claude Code CLI 尚未登录",
+    "execution.auth-unknown": "无法确认 Claude Code 登录状态",
+    "execution.auth-not-verified": "普通扫描尚未执行认证探测",
+    "execution.auth-output-unrecognized": "认证输出无法识别，登录状态保持未知",
+    "execution.auth-probe-timeout": "Claude Code 认证探测超时",
+    "execution.auth-probe-failed": "Claude Code 认证探测失败，登录状态未知",
+    "execution.auth-cli-incompatible": "当前 CLI 版本不支持认证探测",
+    "execution.cli-not-found": "未找到受支持的 Claude Code CLI",
+    "execution.cli-incompatible": "Claude Code CLI 版本不兼容",
+    "execution.already-running": "本机已有活动 Run",
+    "execution.process-state-unknown": "先前 Run 的进程状态无法确认",
+    "execution.cli-probe-failed": "Claude Code CLI 预检失败",
+    "execution.cli-version-unknown": "无法确认 Claude Code CLI 版本",
+    "execution.cli-discovery-failed": "Claude Code CLI 发现检查失败",
+    "storage.read-failed": "本机 Runtime 或存储状态无法读取",
+    "tool.adapter-unavailable": "当前 CLI 仅支持发现，没有执行适配器",
+    "tool.path-unavailable": "已保存的路径现在不可访问，请重新指定路径",
+    "tool.invalid-path": "路径不是所选 Provider 的有效可执行文件",
+    "tool.probe-timeout": "固定版本探测超时",
+    "tool.version-unavailable": "无法读取或解析 CLI 版本",
+    "tool.version-incompatible": "CLI 版本低于支持的最低版本",
+    "tool.unsupported-launcher": "检测到启动器，但当前无法安全探测",
+    "tool.unsupported-platform": "此平台当前不支持该探测方式",
+    "tool.not-found": "PATH 与有限标准目录中没有找到该 CLI",
+    "tool.scan-failed": "扫描失败，请重新指定路径后重试",
+  };
+  return labels[code] ?? `状态原因：${code}`;
 };
 
 export const toolIntegrationMeta = (state: ToolIntegrationStatus): StatusMeta => {
@@ -115,6 +184,9 @@ export const toolRuntimeMeta = (ready: boolean, reasonCode: string | null): Stat
   if (ready) return { label: "Runtime 可执行", tone: "success", icon: "check" };
   if (reasonCode === "execution.managed-policy-unverified") {
     return { label: "Runtime 被策略阻断", tone: "blocked", icon: "alert" };
+  }
+  if (reasonCode === "execution.codex-safety-unverified") {
+    return { label: "Runtime 被 Codex 安全策略阻断", tone: "blocked", icon: "alert" };
   }
   if (reasonCode === "execution.platform-unsupported") {
     return { label: "Runtime 不支持此平台", tone: "failure", icon: "x" };

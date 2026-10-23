@@ -41,4 +41,12 @@ describe("tool status labels", () => {
     expect(toolRuntimeMeta(false, "execution.managed-policy-unverified").label).toBe("Runtime 被策略阻断");
     expect(toolRuntimeMeta(false, "tool.adapter-unavailable").label).toBe("无执行适配器");
   });
+
+  it("distinguishes an unrun auth probe from probe and output failures", () => {
+    expect(toolAuthMeta("unknown", "execution.auth-not-verified").label).toBe("尚未验证认证");
+    expect(toolAuthMeta("unknown", "execution.auth-output-unrecognized").label).toBe("认证输出无法识别");
+    expect(toolAuthMeta("unknown", "execution.auth-probe-timeout").label).toBe("认证探测超时");
+    expect(toolAuthMeta("unknown", "execution.auth-probe-failed").label).toBe("认证探测失败");
+    expect(toolAuthMeta("unknown", "execution.auth-cli-incompatible").label).toBe("认证探测不兼容");
+  });
 });

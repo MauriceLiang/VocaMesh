@@ -10,6 +10,43 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: api.listen }));
 import CreateTaskDialog from "@/features/tasks/CreateTaskDialog.vue";
 import VocaSelect from "@/components/ui/VocaSelect.vue";
 import { __setServicesForTesting, createServices } from "@/services/adapters";
+import type { ExecutionReadiness } from "@/types";
+
+function readinessFixture(
+  provider: "claude" | "codex",
+  message: string,
+  reasonCode: string | null,
+  ready = false,
+): ExecutionReadiness {
+  const authState = provider === "codex" ? "unsupported" : ready ? "authenticated" : "unknown";
+  const policyReasonCode = ready
+    ? null
+    : provider === "codex"
+      ? "execution.codex-safety-unverified"
+      : "execution.managed-policy-unverified";
+  return {
+    ready,
+    version: provider === "codex" ? "0.162.1" : "2.1.296",
+    authState,
+    message,
+    reasonCode,
+    policyStatus: ready ? "verified" : "unverified",
+    checks: [
+      { id: "localStorage", status: "passed", reasonCode: null },
+      { id: "activeRun", status: "passed", reasonCode: null },
+      { id: "processState", status: "passed", reasonCode: null },
+      { id: "platform", status: "passed", reasonCode: null },
+      { id: "cliDiscovery", status: "passed", reasonCode: null },
+      { id: "cliVersion", status: "passed", reasonCode: null },
+      { id: "authentication", status: authState === "unsupported" ? "unsupported" : ready ? "passed" : "unknown", reasonCode: null },
+      { id: "managedPolicy", status: ready ? "passed" : "blocked", reasonCode: policyReasonCode },
+      { id: "taskStart", status: ready ? "passed" : "blocked", reasonCode: ready ? null : reasonCode },
+    ],
+    blockers: ready || !policyReasonCode
+      ? []
+      : [{ check: "managedPolicy", reasonCode: policyReasonCode }],
+  };
+}
 
 describe("native task readiness", () => {
   afterEach(() => {
@@ -25,20 +62,31 @@ describe("native task readiness", () => {
       if (command === "get_default_tool_id") return null;
       if (command === "get_execution_readiness") {
         if (args?.providerId === "codex") {
-          return {
-            ready: false,
-            version: "0.162.1",
-            authState: "unsupported",
-            message: "Codex 的配置、凭据、文件、进程和网络边界尚未证明；真实执行已禁用",
-            reasonCode: "execution.codex-safety-unverified",
-          };
+          return readinessFixture(
+            "codex",
+            "Codex 的配置、凭据、文件、进程和网络边界尚未证明；真实执行已禁用",
+            "execution.codex-safety-unverified",
+          );
         }
         return {
           ready: false,
           version: null,
-          authState: "unknown",
+          authState: "authenticated",
           message: "无法确认组织托管 Hook 是否会产生额外副作用；真实执行已禁用",
           reasonCode: "execution.managed-policy-unverified",
+          policyStatus: "unverified",
+          checks: [
+            { id: "localStorage", status: "passed", reasonCode: null },
+            { id: "activeRun", status: "passed", reasonCode: null },
+            { id: "processState", status: "passed", reasonCode: null },
+            { id: "platform", status: "passed", reasonCode: null },
+            { id: "cliDiscovery", status: "passed", reasonCode: null },
+            { id: "cliVersion", status: "passed", reasonCode: null },
+            { id: "authentication", status: "passed", reasonCode: null },
+            { id: "managedPolicy", status: "blocked", reasonCode: "execution.managed-policy-unverified" },
+            { id: "taskStart", status: "blocked", reasonCode: "execution.managed-policy-unverified" },
+          ],
+          blockers: [{ check: "managedPolicy", reasonCode: "execution.managed-policy-unverified" }],
         };
       }
       return undefined;
@@ -58,6 +106,9 @@ describe("native task readiness", () => {
     await flushPromises();
 
     expect(document.body.textContent).toContain("无法确认组织托管 Hook");
+    expect(document.body.textContent).toContain("Claude Code 已登录，但执行仍被托管策略阻断。");
+    expect(document.body.textContent).toContain("托管策略");
+    expect(document.body.textContent).toContain("Provider 认证");
     const start = Array.from(document.body.querySelectorAll("button"))
       .find((button) => button.textContent?.includes("开始只读任务"));
     expect(start?.disabled).toBe(true);
@@ -119,21 +170,9 @@ describe("native task readiness", () => {
     wrapper.findComponent(VocaSelect).vm.$emit("update:modelValue", "codex");
     await flushPromises();
 
-    resolveCodex?.({
-      ready: false,
-      version: "0.162.1",
-      authState: "unsupported",
-      message: "Codex 的安全边界尚未证明",
-      reasonCode: "execution.codex-safety-unverified",
-    });
+    resolveCodex?.(readinessFixture("codex", "Codex 的安全边界尚未证明", "execution.codex-safety-unverified"));
     await flushPromises();
-    resolveClaude?.({
-      ready: true,
-      version: "2.1.296",
-      authState: "authenticated",
-      message: "Claude 已认证",
-      reasonCode: null,
-    });
+    resolveClaude?.(readinessFixture("claude", "Claude 已认证", null, true));
     await flushPromises();
 
     expect(document.body.textContent).toContain("Codex 的安全边界尚未证明");

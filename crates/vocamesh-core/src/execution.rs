@@ -9,6 +9,153 @@ pub struct ExecutionReadiness {
     pub auth_state: AuthenticationState,
     pub message: String,
     pub reason_code: Option<String>,
+    pub policy_status: ExecutionPolicyStatus,
+    pub checks: Vec<ExecutionCheck>,
+    pub blockers: Vec<ExecutionBlocker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionPolicyStatus {
+    Verified,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionCheckId {
+    LocalStorage,
+    ActiveRun,
+    ProcessState,
+    Platform,
+    CliDiscovery,
+    CliVersion,
+    Authentication,
+    ManagedPolicy,
+    TaskStart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionCheckStatus {
+    Passed,
+    Failed,
+    Blocked,
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionCheck {
+    pub id: ExecutionCheckId,
+    pub status: ExecutionCheckStatus,
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionBlocker {
+    pub check: ExecutionCheckId,
+    pub reason_code: String,
+}
+impl ExecutionReadiness {
+    pub fn storage_unavailable(message: &str) -> Self {
+        let storage_error = "storage.read-failed".to_owned();
+        let checks = vec![
+            ExecutionCheck {
+                id: ExecutionCheckId::LocalStorage,
+                status: ExecutionCheckStatus::Failed,
+                reason_code: Some(storage_error.clone()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::ActiveRun,
+                status: ExecutionCheckStatus::Unknown,
+                reason_code: Some(storage_error.clone()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::ProcessState,
+                status: ExecutionCheckStatus::Unknown,
+                reason_code: Some(storage_error.clone()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::Platform,
+                status: if cfg!(windows) {
+                    ExecutionCheckStatus::Unsupported
+                } else {
+                    ExecutionCheckStatus::Passed
+                },
+                reason_code: cfg!(windows).then(|| "execution.platform-unsupported".into()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::CliDiscovery,
+                status: ExecutionCheckStatus::Unknown,
+                reason_code: Some("execution.cli-unknown".into()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::CliVersion,
+                status: ExecutionCheckStatus::Unknown,
+                reason_code: Some("execution.cli-unknown".into()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::Authentication,
+                status: ExecutionCheckStatus::Unknown,
+                reason_code: Some("execution.auth-unknown".into()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::ManagedPolicy,
+                status: ExecutionCheckStatus::Blocked,
+                reason_code: Some("execution.managed-policy-unverified".into()),
+            },
+            ExecutionCheck {
+                id: ExecutionCheckId::TaskStart,
+                status: ExecutionCheckStatus::Blocked,
+                reason_code: Some(storage_error.clone()),
+            },
+        ];
+        let blockers = checks
+            .iter()
+            .filter_map(|check| {
+                let reason_code = check.reason_code.as_ref()?;
+                (check.status != ExecutionCheckStatus::Passed).then(|| ExecutionBlocker {
+                    check: check.id,
+                    reason_code: reason_code.clone(),
+                })
+            })
+            .collect();
+        Self {
+            ready: false,
+            version: None,
+            auth_state: AuthenticationState::Unknown,
+            message: message.to_owned(),
+            reason_code: Some(storage_error),
+            policy_status: ExecutionPolicyStatus::Unverified,
+            checks,
+            blockers,
+        }
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_diagnostics_serialize_with_stable_ipc_names() {
+        let readiness = ExecutionReadiness::storage_unavailable("storage unavailable");
+        let value = serde_json::to_value(&readiness).unwrap();
+
+        assert_eq!(value["policyStatus"], "unverified");
+        assert_eq!(value["authState"], "unknown");
+        assert_eq!(value["checks"][0]["id"], "localStorage");
+        assert_eq!(value["checks"][0]["status"], "failed");
+        assert_eq!(value["blockers"][0]["check"], "localStorage");
+        assert_eq!(value["blockers"][0]["reasonCode"], "storage.read-failed");
+        assert_eq!(
+            serde_json::from_value::<ExecutionReadiness>(value).unwrap(),
+            readiness
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

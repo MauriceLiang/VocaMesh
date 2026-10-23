@@ -105,6 +105,17 @@ impl ProviderRunner for ClaudeCodeRunner {
                     "execution.auth-probe-failed",
                     "Claude Code 认证状态探测失败",
                 ),
+                AuthenticationProbeError::Unknown => {
+                    ServiceError::new("execution.auth-unknown", "无法确认 Claude Code 登录状态")
+                }
+                AuthenticationProbeError::OutputUnrecognized => ServiceError::new(
+                    "execution.auth-output-unrecognized",
+                    "Claude Code 认证状态输出无法识别",
+                ),
+                AuthenticationProbeError::CliIncompatible => ServiceError::new(
+                    "execution.auth-cli-incompatible",
+                    "当前 Claude Code 版本不支持受控认证探测",
+                ),
             })
     }
 

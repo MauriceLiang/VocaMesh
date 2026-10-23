@@ -7,7 +7,7 @@ import VocaStatus from "@/components/ui/VocaStatus.vue";
 import VocaDialog from "@/components/ui/VocaDialog.vue";
 import VocaInput from "@/components/ui/VocaInput.vue";
 import { useToolsStore } from "@/stores/tools";
-import { toolAuthMeta, toolDiscoveryMeta, toolIntegrationMeta, toolRuntimeMeta, toolVersionMeta } from "@/lib/status";
+import { executionReasonText, toolAuthMeta, toolDiscoveryMeta, toolIntegrationMeta, toolRuntimeMeta, toolVersionMeta } from "@/lib/status";
 
 const tools = useToolsStore();
 const pathOpen = ref(false);
@@ -69,38 +69,14 @@ function sourceText(source: string | null): string {
   return tools.mode === "mock" ? "Mock 来源" : "未知来源";
 }
 
-function reasonText(code: string | null): string {
-  if (!code) return "无额外阻断原因";
-  const labels: Record<string, string> = {
-    "execution.managed-policy-unverified": "当前组织托管执行策略尚未核验",
-    "execution.codex-safety-unverified": "Codex 的配置、凭据、文件、进程和网络安全边界尚未证明",
-    "execution.platform-unsupported": "当前平台的进程安全策略未通过验证",
-    "execution.auth-required": "Claude Code CLI 尚未登录",
-    "execution.auth-unknown": "无法确认 Claude Code 登录状态",
-    "execution.auth-probe-timeout": "Claude Code 认证探测超时",
-    "execution.auth-probe-failed": "Claude Code 认证探测失败，登录状态未知",
-    "storage.read-failed": "本机 Runtime 或存储状态无法读取",
-    "tool.adapter-unavailable": "当前 CLI 仅支持发现，没有执行适配器",
-    "tool.path-unavailable": "已保存的路径现在不可访问，请重新指定路径",
-    "tool.invalid-path": "路径不是所选 Provider 的有效可执行文件",
-    "tool.probe-timeout": "固定版本探测超时",
-    "tool.version-unavailable": "无法读取或解析 CLI 版本",
-    "tool.version-incompatible": "CLI 版本低于支持的最低版本",
-    "tool.unsupported-launcher": "检测到启动器，但当前无法安全探测",
-    "tool.unsupported-platform": "此平台当前不支持该探测方式",
-    "tool.not-found": "PATH 与有限标准目录中没有找到该 CLI",
-    "tool.scan-failed": "扫描失败，请重新指定路径后重试",
-  };
-  return labels[code] ?? `状态原因：${code}`;
-}
 </script>
 
 <template>
   <div class="v-content">
     <PageHeader title="本地工具" subtitle="查看这台电脑发现的 CLI、版本、适配器能力和当前运行条件。工具是运行环境，不是 Agent 身份。">
       <template #actions>
-        <VocaButton :disabled="tools.loading" @click="tools.load"><RefreshCw :size="13" />{{ tools.loading ? "扫描中…" : "重新扫描" }}</VocaButton>
-        <VocaButton variant="primary" :disabled="tools.loading || !tools.tools.length" @click="openPath()">手动指定路径</VocaButton>
+        <VocaButton :disabled="tools.loading || !!tools.verifyingToolId" @click="tools.load"><RefreshCw :size="13" />{{ tools.loading ? "扫描中…" : "重新扫描" }}</VocaButton>
+        <VocaButton variant="primary" :disabled="tools.loading || !!tools.verifyingToolId || !tools.tools.length" @click="openPath()">手动指定路径</VocaButton>
       </template>
     </PageHeader>
 
@@ -137,17 +113,23 @@ function reasonText(code: string | null): string {
           <div class="flex flex-wrap gap-[6px]">
             <VocaStatus :meta="toolDiscoveryMeta(tool.discoveryStatus)" />
             <VocaStatus :meta="toolVersionMeta(tool.versionStatus)" />
-            <VocaStatus :meta="toolAuthMeta(tool.authState)" />
+            <VocaStatus :meta="toolAuthMeta(tool.authState, tool.reasonCode)" />
             <VocaStatus :meta="toolIntegrationMeta(tool.integrationStatus)" />
             <VocaStatus :meta="toolRuntimeMeta(tool.runtimeReady, tool.runtimeReasonCode)" />
           </div>
           <div class="v-banner" :class="tool.reasonCode ? 'is-blocked' : 'is-neutral'" :style="{ padding: '6px 9px' }">
-            <span class="v-tiny">{{ tool.note }} · {{ reasonText(tool.reasonCode) }}</span>
+            <span class="v-tiny">{{ tool.note }} · {{ executionReasonText(tool.reasonCode) }}</span>
           </div>
-          <div v-if="tool.runtimeReasonCode" class="v-tiny v-muted">Runtime 原因：{{ reasonText(tool.runtimeReasonCode) }}</div>
+          <div v-if="tool.runtimeReasonCode" class="v-tiny v-muted">Runtime 原因：{{ executionReasonText(tool.runtimeReasonCode) }}</div>
           <div class="flex flex-wrap items-center gap-[7px]">
-            <VocaButton size="sm" :variant="tool.capabilities.authenticationProbeSupported ? 'primary' : 'secondary'" @click="tools.verify(tool.id)">
-              {{ tool.capabilities.authenticationProbeSupported ? "验证认证" : "重新检测" }}
+            <VocaButton
+              size="sm"
+              :variant="tool.capabilities.authenticationProbeSupported ? 'primary' : 'secondary'"
+              :disabled="!!tools.verifyingToolId && tools.verifyingToolId !== tool.id"
+              :loading="tools.verifyingToolId === tool.id"
+              @click="tools.verify(tool.id)"
+            >
+              {{ tools.verifyingToolId === tool.id ? "正在验证…" : tool.capabilities.authenticationProbeSupported ? "验证认证" : "重新检测" }}
             </VocaButton>
             <VocaButton size="sm" variant="ghost" :disabled="!tools.canSetPreference(tool)" @click="tools.setDefault(tool.id)">{{ tools.defaultToolId === tool.id ? "偏好工具 ✓" : "设为偏好" }}</VocaButton>
             <VocaButton size="sm" variant="ghost" @click="openConfig(tool.id)">查看配置</VocaButton>
@@ -159,14 +141,14 @@ function reasonText(code: string | null): string {
       <div class="v-col-rail v-card v-detail-panel">
         <span class="v-section-title">发现、能力与运行状态</span>
         <p class="v-tiny v-secondary" :style="{ margin: 0, lineHeight: 1.55 }">
-          CLI 发现、版本、认证、适配器能力和 Runtime 就绪分别显示。设为偏好只保存选择，不代表认证通过或 Runtime 已允许执行。
+          CLI 发现、版本、认证、适配器能力和 Runtime 就绪分别显示。认证未知不等于未登录；已登录也不代表 VocaMesh 当前允许执行。设为偏好只保存选择。
         </p>
         <div v-for="(step, index) in ['安装 CLI：在官方渠道安装后回到本页重新扫描。', 'Claude Code 登录状态只通过固定只读探测判断；Codex 已有 JSONL 适配器，但认证与独立安全边界未证明前保持阻断。', '偏好选择不授予运行权限；每个 Provider 都必须通过 Runtime 的独立安全检查。']" :key="index" class="flex items-start gap-[9px]">
           <span class="grid h-[18px] w-[18px] place-items-center rounded-full text-[10px] font-semibold" :style="{ background: 'var(--bg-subtle)' }">{{ index + 1 }}</span>
           <span class="v-tiny v-muted" :style="{ lineHeight: 1.5 }">{{ step }}</span>
         </div>
         <div class="v-banner is-neutral" :style="{ padding: '8px', alignItems: 'flex-start' }">
-          <span class="v-tiny">版本、认证和运行条件分别显示；探测失败不会被当作未安装或可执行。</span>
+          <span class="v-tiny">普通扫描只发现 CLI 和版本，认证显示“尚未验证”；仅支持发现不等于安装失败。验证认证只执行固定只读命令，不发起模型请求。</span>
         </div>
         <span class="v-spacer" />
         <div class="v-divider" />

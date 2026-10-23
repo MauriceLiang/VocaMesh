@@ -20,7 +20,8 @@ pub use catalog::{
 pub use error::ServiceError;
 pub use events::{ScanPhase, ToolScanEvent};
 pub use execution::{
-    ExecutionReadiness, ExecutionRequest, ProcessGroupStatus, RecoveryInspection,
-    RecoveryResolution, RecoveryStatus, RunEvent, RunRecord, RunState, SnapshotStatus, TaskRecord,
-    UnknownRunSummary,
+    ExecutionBlocker, ExecutionCheck, ExecutionCheckId, ExecutionCheckStatus,
+    ExecutionPolicyStatus, ExecutionReadiness, ExecutionRequest, ProcessGroupStatus,
+    RecoveryInspection, RecoveryResolution, RecoveryStatus, RunEvent, RunRecord, RunState,
+    SnapshotStatus, TaskRecord, UnknownRunSummary,
 };
