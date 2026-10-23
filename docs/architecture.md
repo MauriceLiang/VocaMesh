@@ -1,5 +1,13 @@
 # 架构
 
+## v0.7 ProviderRunner 与统一执行协调器
+
+Vue/Pinia 通过 Tauri 请求 Provider-aware readiness 和任务服务；ExecutionRuntime 是唯一生命周期与持久化协调器，包含 provider_policy、快照、StartGate、停止/恢复及 SQLite schema v3 Task/Run/Event。vocamesh-agent 的静态 ProviderRunner 分发到 ClaudeCodeRunner（复用 ClaudeCli）或 CodexCliRunner（codex exec --json）；OpenCode 暂无 Adapter。
+
+ProviderRunner 只负责固定启动方式、Provider 探测、输出协议解析和错误分类；Runtime 继续统一执行入口、单活跃约束、快照、进程监督、状态迁移、事件持久化、取消/超时和 Unknown Run 恢复。Provider ID 经过静态分发，不复制 Runtime 或数据库生命周期。SQLite schema v3 未改变。
+
+任务创建对话框可选择 Claude Code 或 Codex，并请求该 Provider 的 readiness；Tauri 命令要求 providerId，按同一 Provider 返回状态。Codex 的 Adapter 和 fake 生命周期测试已实现，但生产策略 execution.codex-safety-unverified 在新建 Task/Run 前阻断；Claude 继续由 execution.managed-policy-unverified 阻断。前端展示状态不构成授权，Runtime 启动入口始终重新检查。详见 [本机 Agent CLI 运行时](agent-runtime.md) 与 [安全边界](security.md)。
+
 ## v0.4 本地 Catalog 与桌面服务
 
 ```text

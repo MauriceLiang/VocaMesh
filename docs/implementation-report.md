@@ -1,3 +1,47 @@
+# VocaMesh v0.7 ProviderRunner 与 Codex 执行闭环实施报告
+
+> 状态：统一 ProviderRunner、Codex fake CLI Adapter、Provider 独立 readiness、共享 Runtime 生命周期及本地自动化 **PASS**；Claude 隔离 PoC 与原生 GUI 验收 **BLOCKED**；真实 Provider 模型任务 **NOT RUN**。生产真实执行继续 fail-closed。
+
+## 基线与范围
+
+- 分支：feature/v0.7-provider-runner-codex；基线：origin/main / 76cafd0266ef15ec88c609eb3e1847b5156670f1。fetch 后 origin/main 未前移。
+- 保留原有 schema v3、单活跃 Run、SQLite Task/Run/Event、快照、停止/超时和 Unknown Run 恢复路径；没有新增 GitHub Actions workflow。
+- 保留开始前未跟踪项：.DS_Store、.idea/、UI/.write-test、crates/.DS_Store、docs/.DS_Store；这些文件未纳入改动。
+
+## 实施结果
+
+- **M1 — PASS：Claude 认证状态解析。** 官方 JSON/退出码契约经一次明确授权，以固定只读 claude auth status 对本机 Claude Code 2.1.296 做状态探测，退出码 0，脱敏结果为 authenticated。只使用 authMethod 和退出码；原始 stdout/stderr 未保存，未读取凭据文件或发送 Prompt。测试覆盖全部已知非 none authMethod、none、矛盾退出码、未知枚举与畸形 JSON。
+- **M2 — PASS：统一 ProviderRunner。** 静态分发接入 ClaudeCodeRunner 与 CodexCliRunner；保留一个公共 Runtime 调度与持久化协调器，不复制状态机或数据库 schema。
+- **M3 — PASS：Codex fake Adapter。** Codex CLI 0.162.1 的版本及 codex exec --help 仅做本地只读能力核对。Runner 以固定独立参数启动 codex exec --json，Prompt 通过 stdin；只解析白名单 JSONL。fake CLI 覆盖成功、Provider 失败、缺少协议完成、停止、超时、流分块/EOF/非 UTF-8/超长事件，并验证 Task/Run/Event 生命周期。
+- **M4 — PASS：独立执行策略。** Claude 的 execution.managed-policy-unverified 未改变；Codex 使用 execution.codex-safety-unverified，生产入口在创建 Task/Run 前 fail-closed。测试策略只在 cfg(test) 编译。Codex Adapter 存在不代表真实安全边界已验证。
+- **M5 — PASS：Runtime、Tauri 与 UI 接线。** Provider-aware readiness 参数贯穿 ExecutionService、Tauri command、Runtime 与创建任务界面；不同 Provider 读取自己的 readiness。竞态回归测试覆盖 Provider 切换时迟到 readiness 不覆盖当前状态；requestId 幂等冲突现在也比较 providerId。数据库 schema v3 和既有 Run/event IPC 不变。
+- **M6 — BLOCKED / NOT RUN：Claude 隔离 PoC。** 威胁模型及路线比较已记录；没有一次性测试用户/隔离设备和可审查系统级拒绝证据，未运行沙箱、Hook、文件/网络哨兵或真实 CLI 任务。
+- **M7 — BLOCKED / NOT RUN：macOS 原生 GUI 验收。** 本轮构建了 app bundle，但没有 Finder/Launchpad 启动、窗口、目录选择、停止/恢复的人机验收证据。
+
+## 本地质量门禁
+
+首次以默认线程数运行 Runtime fake CLI 集成测试时，多个测试同时启动合成 CLI 探测，偶发触发 5 秒探测超时。只在测试中为会启动 fake CLI 的生命周期用例增加互斥，保留生产探测时限与并发代码；默认线程数下 Runtime 51 项测试及最终完整门禁随后通过。\n\n最终执行 ./scripts/verify-local.sh，退出码 0：
+
+| 检查 | 结果 |
+| --- | --- |
+| cargo fmt --all -- --check | PASS |
+| cargo clippy --workspace --all-targets --all-features --offline -- -D warnings | PASS |
+| cargo test --workspace --offline --quiet | PASS，99 项（Agent 43、Core 3、Desktop 2、Runtime 51） |
+| cargo check --workspace --all-targets --all-features --offline | PASS |
+| pnpm --dir frontend typecheck | PASS |
+| pnpm --dir frontend test | PASS，11 个文件、46 项 |
+| pnpm --dir frontend build | PASS，Vite production build |
+| git diff --check | PASS |
+
+另执行 pnpm --dir frontend tauri build --bundles app --no-sign，退出码 0。产物为 target/release/bundle/macos/VocaMesh.app（14.61 MiB）；签名按要求跳过。app bundle 构建不证明 Finder 启动或 GUI 验收通过。
+
+## 未验收范围与风险
+
+- Claude 认证 authenticated 只表示 CLI 状态分类，不解除 managed hooks 门禁；Codex 未运行认证命令，未运行真实 Provider/模型任务，没有模型调用或 Prompt 上传。
+- Claude 隔离 PoC、macOS GUI、Windows/Linux 本机验收、Playwright E2E 和远端 CI：BLOCKED 或 NOT RUN；未以本地自动化结果替代。
+- Codex 的只读参数及过滤环境变量不是全进程 OS 沙箱证明。生产策略必须继续阻断，直到独立的配置/凭据/文件/进程/网络安全证据通过并由维护者重新决策。
+- app 未签名且未启动；bundle 构建不提供 GUI 验收证据。
+
 # VocaMesh v0.5 Local Agent Integration 实施报告
 
 > 状态：M1–M6 实现与本地自动化门禁 PASS；M7 macOS GUI BLOCKED。没有进行真实 CLI 认证命令或模型任务，因此本报告不代表真实执行验收。

@@ -59,3 +59,13 @@ Codex CLI 官方文档说明 `codex login status` 输出当前认证模式并以
 | 平台与维护成本 | 等待官方能力，并逐平台验收 | 维护 API 协议、密钥/计费/网络和数据处理；逐平台验收 | 分别维护 macOS、Windows、Linux 沙箱与打包/更新恢复流程 |
 
 当前选择仍是 A。要进入 B，维护者需明确接受独立凭据、计费、网络和数据流设计；要进入 C，需提供逐平台文件、进程、凭据、网络、更新及恢复验收。以上材料是决策准备，不构成方案批准。
+
+## v0.7 ProviderRunner、认证状态与 Codex 安全补充
+
+本轮引入静态 ProviderRunner 分发及 Codex CLI fake Adapter 闭环，没有改变 Claude 的生产门禁，也没有把 Codex 当作替代执行开关。Claude 保持 execution.managed-policy-unverified；Codex 的独立策略返回 execution.codex-safety-unverified，生产任务入口在创建 Task/Run 前拒绝它。Codex --sandbox read-only、--ignore-user-config、--ignore-rules 和过滤环境变量不构成整个 CLI 进程的文件、凭据、Hook、进程或网络隔离证明；OpenCode 仍无 Adapter。
+
+经用户对单次固定只读探测的明确授权，本机 Claude Code 2.1.296 执行 claude auth status，返回退出码 0，解析出的脱敏分类为 authenticated。原始 stdout/stderr 未保存、未写日志或报告；未发送 Prompt、未启动模型任务、未读取凭据正文。当前 [Claude Code CLI usage 文档](https://code.claude.com/docs/en/cli-usage) 规定 JSON 状态中的 authMethod、登录/未登录退出码及 configDirectory 字段（Claude Code 2.1.268 起提供该字段）。VocaMesh 仅解析退出码与已知 authMethod，忽略其它字段；退出码与枚举矛盾或出现未知枚举时保持 unknown。该认证结果不代表策略就绪。
+
+本机 Codex CLI 为 0.162.1；只检查版本及 codex exec --help 的本地能力文本，没有运行 codex login status、执行模型任务或读取 Codex 配置/凭据。Runner 使用非交互 codex exec --json，Prompt 经 stdin，fake CLI 覆盖了事件、终态、失败、停止/超时与共享 Runtime 生命周期。当前官方 [Codex CLI reference](https://developers.openai.com/codex/cli/reference) 和 [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive) 提供命令及 JSONL 协议说明；协议兼容不等于安全可执行。
+
+Claude 隔离威胁模型及路线比较见 [claude-isolation-threat-model.md](../security/claude-isolation-threat-model.md)。本轮没有确认一次性测试用户/设备，也没有运行系统级沙箱、Hook 文件/网络/进程哨兵或可审查拒绝日志，故隔离 PoC 为 **BLOCKED / NOT RUN**。macOS 原生 GUI 验收同样没有可观察证据。生产真实执行继续 fail-closed；要改变该状态必须由维护者基于新证据重新批准 ADR。

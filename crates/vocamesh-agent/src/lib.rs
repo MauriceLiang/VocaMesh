@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod execution;
 pub mod path_resolver;
 pub mod process_probe;
+pub mod runner;
 pub mod settings;
 
 use crate::path_resolver::{resolve, validate_manual_path, Resolution};
@@ -508,12 +509,9 @@ mod tests {
         assert_eq!(codex.version_status, ToolVersionStatus::Known);
         assert_eq!(
             codex.integration_status,
-            ToolIntegrationStatus::DiscoveryOnly
+            ToolIntegrationStatus::AdapterAvailable
         );
-        assert_eq!(
-            codex.reason_code.as_deref(),
-            Some("tool.adapter-unavailable")
-        );
+        assert_eq!(codex.reason_code, None);
         assert!(!tools.iter().any(|tool| tool.state == ToolState::Ready));
     }
 
@@ -567,12 +565,17 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_provider_cannot_become_default_even_when_discovered() {
+    fn codex_adapter_can_be_preferred_without_becoming_runtime_ready() {
         let (_dir, mut runtime) = setup(FakeProbe(version("codex 1.2.3")));
         runtime.scan_tools().unwrap();
-        let error = runtime.set_default_tool("codex").unwrap_err();
-        assert_eq!(error.code, "tool.adapter-unavailable");
-        assert_eq!(runtime.default_tool_id().unwrap(), None);
+        runtime.set_default_tool("codex").unwrap();
+        assert_eq!(runtime.default_tool_id().unwrap().as_deref(), Some("codex"));
+        let codex = runtime
+            .latest
+            .iter()
+            .find(|tool| tool.id == "codex")
+            .unwrap();
+        assert!(!codex.runtime_ready);
     }
 
     #[test]

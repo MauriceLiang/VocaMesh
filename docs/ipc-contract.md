@@ -38,7 +38,15 @@ Rust command 使用 snake_case；DTO JSON 使用 camelCase。界面和 Store 只
 | `get_task` | `{ taskId }` | `TaskRecord` | 读取一个本机任务。 |
 | `list_runs` | `{ cursor?, limit? }` | `RunPage` | SQLite 游标分页；页大小限制为 1–100。 |
 
-`ExecutionRequest` 包含 `requestId`、`title`、`prompt`、`providerId`、`workspacePath` 和用户确认的 `consent`。本阶段只接受 Provider `claude`。Runtime 将规范化路径、`read-only-filtered-snapshot` 授权范围和确认时间写入 Task。请求 ID 必须是 UUID；重复 ID 返回原记录，冲突载荷返回 `execution.request-duplicate`。
+ExecutionRequest 包含 requestId、title、prompt、providerId、workspacePath 和用户确认的 consent。当前 Claude 与 Codex 进入各自 Adapter/策略校验；Claude 仍因 managed policy 阻断，Codex 在生产策略门禁处以 execution.codex-safety-unverified 阻断，并且均不会因此绕过 Runtime 校验。OpenCode 因缺少 Adapter 返回 execution.adapter-unavailable。成功进入执行阶段的请求才会把规范化路径、read-only-filtered-snapshot 授权范围和确认时间写入 Task。请求 ID 必须是 UUID；重复 ID 返回原记录，冲突载荷返回 execution.request-duplicate。
+
+## v0.7 Provider 相关命令与事件
+
+前端创建任务时以 ExecutionService.readiness(providerId) 请求当前选择项的状态；Tauri adapter 将 { providerId: claude | codex } 传给 get_execution_readiness。Tauri 根据该 ID 调用 ExecutionRuntime::readiness_for，不把 Claude 的策略结果复用到 Codex，也不接受前端提供的“已验证”开关。未知 Provider 请求返回稳定错误。
+
+start_read_only_task 接收原有 ExecutionRequest，后端根据 providerId 选择静态 Runner 并再次核验对应策略、CLI、工作区和用户确认。策略阻断发生在保存 Task/Run 前。Codex 已有 Runner，但生产 readiness 返回 execution.codex-safety-unverified；Claude 仍返回 execution.managed-policy-unverified。两者共享原来的状态和持久化契约，无 schema 迁移或 Provider 专用执行命令。
+
+Codex JSONL 的允许输出映射到既有 Run Event 类型：摘要文本为 final、固定阶段信息为 progress、Provider 拒绝为已过滤的 error、未知/畸形协议为固定 protocol-error。协议终态本身只作为 Runtime 成功判定状态，不持久化原始 JSON。turn.failed、缺失完成事件或非零退出码不会成为成功 Run；未知协议内容不进入 IPC。
 
 Catalog DTO 使用 `camelCase`，所有时间为 Unix epoch 毫秒。Agent、Workspace、Team 使用稳定 ID；Team 成员的 `name`、`role`、Provider 与 `reportsToAgentId` 从已保存记录查询。Workspace 的 `pathAvailable=false` 表示登记路径当前丢失、不可访问或不再通过安全路径检查；记录仍保留，Team 新建或改绑必须选有效目录。Agent `permissions` 与 Workspace `scopes` 仅为草稿，不代表 Runtime 授权。Tauri 服务不会因为 CLI 探测失败而删除或伪造 Catalog 项。
 
@@ -69,6 +77,7 @@ Command 错误序列化为 `{ code, message }`，前端映射为 `ServiceError`�
 - `workspace.not-found`、`workspace.duplicate`、`workspace.path-missing`、`workspace.invalid-path`、`workspace.invalid-input`、`workspace.invalid-scope`、`workspace.in-use`、`workspace.revision-conflict`；
 - `team.not-found`、`team.duplicate`、`team.invalid-input`、`team.member-exists`、`team.member-not-found`、`team.self-management`、`team.cycle`、`team.supervisor-required`、`team.workspace-unavailable`、`team.revision-conflict`；
 - `execution.provider-not-supported`、`execution.cli-not-ready`、`execution.cli-not-found`、`execution.cli-incompatible`、`execution.auth-required`、`execution.auth-unknown`、`execution.workspace-invalid`、`execution.consent-required`、`execution.managed-policy-unverified`、`execution.already-running`、`execution.process-state-unknown`、`execution.request-duplicate`、`execution.invalid-request`；
+- Provider 执行补充错误：execution.codex-safety-unverified、execution.adapter-unavailable、execution.codex-version-incompatible、execution.codex-probe-failed、execution.codex-probe-timeout、execution.auth-probe-failed、execution.auth-probe-timeout、execution.read-only-policy-unavailable、execution.provider-failed、execution.output-protocol-error、execution.stdin-unavailable、execution.stdin-write-failed。
 - `run.not-found`、`run.invalid-id`、`run.recovery-not-required`、`run.recovery-confirmation-required`、`run.recovery-process-present`、`run.recovery-path-invalid`、`run.stop-failed`、`run.stop-unconfirmed`；Run 持久化错误码还包括 `run.timeout`、`run.output-protocol-error`、`execution.spawn-failed`；
 - `storage.read-failed`、`storage.write-failed`、`storage.schema-unsupported`、`execution.runtime-failed`。
 

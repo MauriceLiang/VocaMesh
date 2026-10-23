@@ -4,9 +4,9 @@ use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
     derive_tool_state, AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings,
     CatalogStatus, CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness,
-    ExecutionRequest, LocalTool, RecoveryInspection, RecoveryResolution, RunEvent, RunRecord,
-    ScanPhase, ServiceError, TaskRecord, TeamMemberRecord, TeamRecord, ToolIntegrationStatus,
-    ToolScanEvent, UnknownRunSummary, UpdateAgentInput, UpdateTeamInput,
+    ExecutionRequest, LocalTool, Provider, RecoveryInspection, RecoveryResolution, RunEvent,
+    RunRecord, ScanPhase, ServiceError, TaskRecord, TeamMemberRecord, TeamRecord,
+    ToolIntegrationStatus, ToolScanEvent, UnknownRunSummary, UpdateAgentInput, UpdateTeamInput,
     UpdateWorkspaceScopesInput, WorkspaceRecord,
 };
 use vocamesh_runtime::{ExecutionRuntime, RuntimeNotification};
@@ -70,6 +70,9 @@ fn apply_runtime_readiness(
                 Some("execution.managed-policy-unverified") => {
                     tool.integration_status = ToolIntegrationStatus::BlockedByPolicy;
                 }
+                Some("execution.codex-safety-unverified") => {
+                    tool.integration_status = ToolIntegrationStatus::BlockedByPolicy;
+                }
                 Some("execution.platform-unsupported") => {
                     tool.integration_status = ToolIntegrationStatus::UnsupportedPlatform;
                 }
@@ -91,6 +94,15 @@ fn apply_runtime_readiness(
     tool
 }
 
+fn runtime_readiness_for(
+    execution: Option<&ExecutionRuntime>,
+    provider_id: &str,
+) -> Option<ExecutionReadiness> {
+    let runtime = execution?;
+    let provider = provider_id.parse::<Provider>().ok()?;
+    Some(runtime.readiness_for(provider))
+}
+
 #[tauri::command]
 pub(crate) async fn scan_tools(
     app: AppHandle,
@@ -108,7 +120,6 @@ pub(crate) async fn scan_tools(
     let scan_generation = Arc::clone(&state.scan_generation);
     let execution = state.execution.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
         if scan_generation.load(Ordering::SeqCst) != generation {
             return Err(ERR_SCAN_SUPERSEDED);
@@ -116,7 +127,10 @@ pub(crate) async fn scan_tools(
         runtime.scan_tools().map(|tools| {
             tools
                 .into_iter()
-                .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+                .map(|tool| {
+                    let readiness = runtime_readiness_for(execution.as_ref(), &tool.id);
+                    apply_runtime_readiness(tool, readiness.as_ref())
+                })
                 .collect()
         })
     })
@@ -155,11 +169,11 @@ pub(crate) async fn verify_tool(
     let runtime = Arc::clone(&state.runtime);
     let execution = state.execution.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
-        runtime
-            .verify_tool(&id)
-            .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+        runtime.verify_tool(&id).map(|tool| {
+            let readiness = runtime_readiness_for(execution.as_ref(), &tool.id);
+            apply_runtime_readiness(tool, readiness.as_ref())
+        })
     })
     .await
     .map_err(|_| ERR_RUNTIME)?
@@ -174,11 +188,11 @@ pub(crate) async fn set_tool_path(
     let runtime = Arc::clone(&state.runtime);
     let execution = state.execution.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let readiness = execution.as_ref().map(ExecutionRuntime::readiness);
         let mut runtime = runtime.lock().map_err(|_| ERR_RUNTIME)?;
-        runtime
-            .set_tool_path(&id, &path)
-            .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+        runtime.set_tool_path(&id, &path).map(|tool| {
+            let readiness = runtime_readiness_for(execution.as_ref(), &tool.id);
+            apply_runtime_readiness(tool, readiness.as_ref())
+        })
     })
     .await
     .map_err(|_| ERR_RUNTIME)?
@@ -445,17 +459,25 @@ pub(crate) async fn update_appearance_settings(
 #[tauri::command]
 pub(crate) async fn get_execution_readiness(
     state: State<'_, AppState>,
+    provider_id: String,
 ) -> Result<ExecutionReadiness, ServiceError> {
+    let provider = provider_id.parse::<Provider>().map_err(|_| {
+        ServiceError::new("execution.provider-not-supported", "Provider 当前不可执行")
+    })?;
     let Some(runtime) = state.execution.clone() else {
         return Ok(ExecutionReadiness {
             ready: false,
             version: None,
-            auth_state: vocamesh_core::AuthenticationState::Unknown,
+            auth_state: if provider == Provider::Codex {
+                vocamesh_core::AuthenticationState::Unsupported
+            } else {
+                vocamesh_core::AuthenticationState::Unknown
+            },
             message: ERR_STORAGE.message.into(),
             reason_code: Some(ERR_STORAGE.code.into()),
         });
     };
-    tauri::async_runtime::spawn_blocking(move || Ok(runtime.readiness()))
+    tauri::async_runtime::spawn_blocking(move || Ok(runtime.readiness_for(provider)))
         .await
         .map_err(|_| ERR_RUNTIME)?
 }
@@ -668,13 +690,13 @@ mod tool_readiness_tests {
     }
 
     #[test]
-    fn runtime_readiness_does_not_make_discovery_only_provider_executable() {
+    fn codex_adapter_is_shown_as_blocked_until_its_own_policy_is_proven() {
         let readiness = ExecutionReadiness {
-            ready: true,
-            version: Some("2.1.296".into()),
-            auth_state: AuthenticationState::Authenticated,
-            message: "ready".into(),
-            reason_code: None,
+            ready: false,
+            version: Some("0.162.1".into()),
+            auth_state: AuthenticationState::Unsupported,
+            message: "Codex policy unknown".into(),
+            reason_code: Some("execution.codex-safety-unverified".into()),
         };
         let mut codex = LocalTool::unavailable(Provider::Codex, ToolState::Missing, "test");
         codex.discovery_status = ToolDiscoveryStatus::Found;
@@ -685,12 +707,12 @@ mod tool_readiness_tests {
         assert!(!codex.runtime_ready);
         assert_eq!(
             codex.integration_status,
-            ToolIntegrationStatus::DiscoveryOnly
+            ToolIntegrationStatus::BlockedByPolicy
         );
         assert_eq!(codex.auth_state, AuthenticationState::Unsupported);
         assert_eq!(
             codex.runtime_reason_code.as_deref(),
-            Some("tool.adapter-unavailable")
+            Some("execution.codex-safety-unverified")
         );
         assert_eq!(codex.state, ToolState::Undetectable);
     }

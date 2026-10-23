@@ -627,7 +627,7 @@ export function createMockServices(): Services {
 
   const execution: ExecutionService = {
     async selectWorkspaceDirectory() { return null; },
-    async readiness() { return { ready: false, version: null, authState: "unknown", message: "真实只读执行仅在桌面端提供", reasonCode: "execution.not-supported" }; },
+    async readiness(_providerId) { return { ready: false, version: null, authState: "unknown", message: "真实只读执行仅在桌面端提供", reasonCode: "execution.not-supported" }; },
     async listUnknownRuns() { return []; },
     async inspectUnknownRun() { throw new ServiceError("恢复检查仅在桌面端提供", "execution.not-supported"); },
     async resolveUnknownRun() { throw new ServiceError("恢复归档仅在桌面端提供", "execution.not-supported"); },

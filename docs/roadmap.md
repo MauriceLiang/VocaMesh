@@ -47,3 +47,9 @@
 `./scripts/verify-local.sh` 退出码 0：Rust workspace 88 项测试（Agent 37、Core 3、Tauri 2、Runtime 46）、前端 11 个文件/44 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查全部 PASS。本阶段没有运行任何认证状态命令或真实模型请求。macOS GUI 因缺少完整 Xcode/可验收窗口为 BLOCKED；Windows、Linux、Playwright E2E 和远端 CI 为 NOT RUN。逐项证据与当前分支提交/PR 状态见 `implementation-report.md`。
 
 `pnpm --dir frontend tauri build --bundles app --no-sign` 另行成功生成 macOS `.app` bundle；跳过代码签名，且没有启动窗口，因此不改变 GUI BLOCKED 状态。
+
+## v0.7 ProviderRunner 与 Codex fake 执行闭环
+
+分支 feature/v0.7-provider-runner-codex 基于制定文档的 origin/main 基线 76cafd0266ef15ec88c609eb3e1847b5156670f1。统一 ProviderRunner 接管 Claude/Codex 的静态分发，保持一个 Runtime 和 SQLite schema v3；Codex 具备 codex exec --json Adapter、Provider-aware readiness、Tauri/前端 Provider 选择及共享 Task/Run/Event、停止、超时和恢复 fake 覆盖。Codex 真实任务在 execution.codex-safety-unverified 阻断；Claude 仍由 execution.managed-policy-unverified 阻断。OpenCode 暂无 Adapter。
+
+本轮 Claude auth status 一次只读探测的脱敏分类为 authenticated，退出码 0；没有发送模型 Prompt。Claude 隔离威胁模型与路线比较已写入 docs/security/claude-isolation-threat-model.md，但未运行系统级 PoC；macOS GUI、真实 CLI 模型任务、Windows、Linux、Playwright E2E 和远端 CI 未验收。自动化与 app 构建结果记录在 docs/implementation-report.md；本地自动化不能替代这些验收项。
