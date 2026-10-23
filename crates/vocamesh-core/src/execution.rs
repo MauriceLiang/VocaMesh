@@ -8,6 +8,7 @@ pub struct ExecutionReadiness {
     pub version: Option<String>,
     pub auth_state: AuthenticationState,
     pub message: String,
+    pub reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,32 @@ pub enum RunState {
     Finished,
     Crashed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryStatus {
+    None,
+    Required,
+    Resolved,
+    ManualRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessGroupStatus {
+    ExitedCandidate,
+    StillRunning,
+    CannotVerify,
+    ManualRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotStatus {
+    Exists,
+    Missing,
+    CannotVerify,
 }
 
 impl RunState {
@@ -75,6 +102,32 @@ pub struct RunRecord {
     pub output_truncated: bool,
     pub process_id: Option<u32>,
     pub error_code: Option<String>,
+    pub recovery_status: RecoveryStatus,
+    pub recovery_checked_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnknownRunSummary {
+    pub run: RunRecord,
+    pub task_title: String,
+    pub snapshot_status: SnapshotStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryInspection {
+    pub run: RunRecord,
+    pub task_title: String,
+    pub process_group_status: ProcessGroupStatus,
+    pub snapshot_status: SnapshotStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryResolution {
+    pub run: RunRecord,
+    pub snapshot_status: SnapshotStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

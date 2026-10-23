@@ -1,8 +1,11 @@
-import type { ExecutionReadiness, NativeRunEvent, NativeRunRecord, NativeTaskRecord, StartReadOnlyTaskInput } from "@/types";
+import type { ExecutionReadiness, NativeRunEvent, NativeRunRecord, NativeTaskRecord, RecoveryInspection, RecoveryResolution, StartReadOnlyTaskInput, UnknownRunSummary } from "@/types";
 
 export interface ExecutionService {
   selectWorkspaceDirectory(): Promise<string | null>;
   readiness(): Promise<ExecutionReadiness>;
+  listUnknownRuns(): Promise<UnknownRunSummary[]>;
+  inspectUnknownRun(runId: string): Promise<RecoveryInspection>;
+  resolveUnknownRun(runId: string, userConfirmed: boolean): Promise<RecoveryResolution>;
   startReadOnlyTask(input: StartReadOnlyTaskInput): Promise<{ task: NativeTaskRecord; run: NativeRunRecord }>;
   stopRun(runId: string): Promise<NativeRunRecord>;
   getRun(runId: string): Promise<NativeRunRecord>;

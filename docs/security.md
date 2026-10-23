@@ -28,7 +28,10 @@ Runtime 规范化并验证用户选择的目录，拒绝文件系统根、Home �
 - `stderr` 最多保留 16 KiB 于内存并继续排空管道。分类器只返回固定的无效参数、认证、配置或一般失败类别；原始 stderr、路径、Token 和认证输出不会写入事件、SQLite、UI 或日志。
 - `stdout` 只解析白名单 JSONL 字段；未知事件与原始工具输入不转发。疑似凭据命中的可见文本会遮蔽整条事件。单条事件最多 64 KiB，每 Run 最多保存 2 MiB，达到上限后仍继续排空。
 - Unix 任务使用独立进程组。停止与超时先发送 `SIGTERM`、等待 2 秒后发送 `SIGKILL`，并确认进程组消失。即使主进程正常退出，也会检查同组后代；遗留后代会被终止，不能确认进程树退出时 Run 进入 `unknown`。
-- `unknown` 保留当前 Run 的 PID/进程组号和快照，并阻止后续新任务。PID 只作为恢复诊断信息；应用重启后不会仅凭 PID 杀进程，也不会自动重跑。当前没有跨重启验证身份或解除 unknown 的恢复 UI。
+- `unknown` 保留当前 Run 的 PID/PGID 和快照，并阻止后续新任务。schema v2 在事务性 migration 中增加 `process_group_id`、`recovery_status` 与 `recovery_checked_at`，保留所有旧 Task/Run/Event；不删除或重建用户数据库。旧 active Run 在重启时进入 `unknown` 并写入固定恢复审计事件，v1 中没有可靠 PGID 的旧记录设为 `manual_required`。原有错误码与恢复状态分开保存。
+- Unknown Run 恢复只允许后端查询和更新：PGID 缺失为 `manual-required`；Unix `kill(-PGID, 0)` 返回 `ESRCH` 仅为 `exited-candidate`；进程组存在、`EPERM`、其他 syscall 错误或不支持平台都继续阻塞。检查不会终止进程。PGID 不存在不能证明已脱离原进程组的后代已经退出。
+- 归档前，用户必须在系统进程管理工具中人工核验相关 VocaMesh/Claude Code 进程并明确确认；Runtime 在 `start_gate` 内重新检查 PGID，并在同一个 SQLite 事务中把 Run 标为失败、保留原始 `error_code`、更新恢复状态并写入固定审计事件。事务提交后才按可信应用数据目录和 UUID 请求 ID 清理快照；Unix 使用逐级 `O_NOFOLLOW` 打开的目录描述符及 `unlinkat`，不沿父目录符号链接删除。清理失败不会回滚到 Unknown 或改写为成功，只追加固定清理失败诊断；不重跑任务。
+- Recovery IPC 不接受前端 PID、PGID、快照路径或“进程已退出”布尔值。前端只看到短 Run ID、任务标题、稳定错误码、检查结果、快照存在状态和最近检查时间；浏览器 Mock 返回空恢复列表且不调用 Tauri。
 - SQLite 迁移/读取失败不会删除数据库。终态写入失败会尽力将 Run 标成 `unknown`；若数据库仍不可写，active 记录继续阻止新任务，快照保持不清理。
 - Windows readiness 固定为不可执行；Linux 未通过本机运行验收。GUI/平台状态见 `implementation-report.md`。
 

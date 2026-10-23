@@ -7,6 +7,7 @@ import VocaIconButton from "@/components/ui/VocaIconButton.vue";
 import VocaStatus from "@/components/ui/VocaStatus.vue";
 import TaskFlow from "./TaskFlow.vue";
 import TaskChat from "./TaskChat.vue";
+import RuntimeRecoveryPanel from "./RuntimeRecoveryPanel.vue";
 import InspectorPanel from "@/features/inspector/InspectorPanel.vue";
 import { useAppStore } from "@/stores/app";
 import { useApprovalsStore } from "@/stores/approvals";
@@ -188,6 +189,7 @@ function exportSummary(): void {
       <span class="flex-1">{{ banner.text }}</span>
       <VocaButton v-if="pendingApproval" size="sm" @click="router.push({ name: 'approvals' })">查看审批</VocaButton>
     </div>
+    <RuntimeRecoveryPanel v-if="task.nativeExecution && task.state === 'unknown'" :run-id="task.runId" />
 
     <div class="v-card" :style="{ display: 'flex', alignItems: 'center', padding: '8px 4px', flex: '0 0 auto' }">
       <div class="flex flex-1 items-baseline gap-[6px] px-[14px]"><b :style="{ color: 'var(--status-success)', fontSize: '15px' }">{{ counts.done }}</b><span class="v-small v-secondary">已完成</span></div>

@@ -21,6 +21,12 @@
 
 本轮 `./scripts/verify-local.sh` 八项本地门禁全部通过：Rust 52 项测试、前端 7 个文件/28 项测试，以及 fmt、Clippy、Cargo check、typecheck、生产构建和 diff 检查。新增前端用例验证策略 readiness 阻止启动。没有运行真实 CLI 或模型请求；M5 因 managed policy 无法核验标记 BLOCKED。macOS 原生 GUI 因缺少完整 Xcode/可验收桌面环境标记 BLOCKED；Windows、Linux、Playwright E2E 和远端 CI 均未在本轮验收。v0.3 阶段仍未完成，详见 `implementation-report.md`。
 
+### v0.3.1 Runtime 恢复与安全边界
+
+`feature/v0.3.1-runtime-recovery` 基于 `eb94b54b0e3b51e4e6c685a2caa3833a63f14930`。实现了 SQLite schema v2 和保留历史的 v1→v2 事务迁移、Unknown Run 恢复审计、Unix PGID 后端检查、用户人工核验后重新检查并失败归档、快照清理失败诊断、可区分的 readiness 原因码，以及桌面恢复面板。新建 ADR 0001，决定在可验证的 managed hooks 安全边界出现前继续保持 CLI fail-closed。生产 managed policy 门禁未变；没有启动真实 CLI 任务、调用模型或加入 GitHub Actions。
+
+本轮 `./scripts/verify-local.sh` 退出码 0：Rust workspace 65 项测试（Agent 25、Core 2、Runtime 38）、前端 8 个文件/32 项测试，以及 fmt、Clippy、Cargo check、typecheck、生产构建和 diff 检查全部 PASS。macOS GUI 验收因当前只有 Command Line Tools、缺少完整 Xcode 标记 BLOCKED；真实 CLI/模型、Windows、Linux、Playwright E2E 与远端 CI 未验收。v0.3 真实执行阶段仍未完成。详细证据见 `implementation-report.md`。
+
 ## 后续阶段
 
 - 先补齐受控执行生命周期与平台验收，再考虑可审核写权限、文件变更审批和 Codex/OpenCode Adapter。

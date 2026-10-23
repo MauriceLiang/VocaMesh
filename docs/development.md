@@ -53,4 +53,11 @@ PowerShell：
 
 ## 真实 CLI 与平台验收
 
-自动化用例覆盖纯解析、目录描述符快照、实际复制上限、SQLite unknown/恢复、Unix fake CLI 成功/失败/停止/超时/孤儿进程组/诊断脱敏，以及前端 readiness 门禁。Fake CLI 不访问真实账号或模型。真实模型请求只有在 M1–M3 策略门禁通过且开发者另行明确授权后才能手工运行；当前 managed hooks 风险未能可靠排除，真实任务验收应标记 BLOCKED。GUI/目录选择、桌面停止和重启恢复须在有完整 Xcode 和桌面会话的机器上单独验收；不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。
+自动化用例覆盖纯解析、目录描述符快照、实际复制上限、SQLite v1→v2 migration/历史保留/回滚/future schema 拒绝、Unknown Run 检查/恢复、进程组状态与清理失败、Unix fake CLI 成功/失败/停止/超时/孤儿进程组/诊断脱敏，以及前端 readiness 与恢复面板 IPC/确认流程。Fake CLI 不访问真实账号或模型。定向运行：
+
+```bash
+cargo test -p vocamesh-runtime --offline
+pnpm --dir frontend test -- --run
+```
+
+真实模型请求只有在 M1–M3 策略门禁通过且开发者另行明确授权后才能手工运行；当前 managed hooks 风险未能可靠排除，真实任务验收应标记 BLOCKED。GUI/目录选择、桌面停止和重启恢复须在有完整 Xcode 和可验收桌面会话的机器上单独验收：使用受控 fixture 创建 Unknown Run，分别检查仍运行、退出候选、无法核实和缺少 PGID；验证确认前不归档、确认后 Run 记为失败、快照清理和再次启动门禁行为。不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。

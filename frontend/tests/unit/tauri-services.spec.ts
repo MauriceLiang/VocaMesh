@@ -86,7 +86,22 @@ describe("runtime service adapter", () => {
     api.invoke.mockClear();
     const browser = createServices("mock");
     expect(await browser.tasks.listTasks()).not.toHaveLength(0);
+    expect(await browser.execution.listUnknownRuns()).toEqual([]);
     expect(api.invoke).not.toHaveBeenCalled();
+  });
+
+  it("routes recovery inspection and confirmation through Tauri execution IPC", async () => {
+    const services = createServices("tauri");
+    api.invoke.mockResolvedValueOnce([]);
+    expect(await services.execution.listUnknownRuns()).toEqual([]);
+    api.invoke.mockResolvedValueOnce({ processGroupStatus: "exited-candidate" });
+    expect(await services.execution.inspectUnknownRun("run_1")).toEqual({ processGroupStatus: "exited-candidate" });
+    const resolution = { run: { id: "run_1", state: "crashed" }, snapshotStatus: "missing" };
+    api.invoke.mockResolvedValueOnce(resolution);
+    expect(await services.execution.resolveUnknownRun("run_1", true)).toEqual(resolution);
+    expect(api.invoke).toHaveBeenNthCalledWith(1, "list_unknown_runs", undefined);
+    expect(api.invoke).toHaveBeenNthCalledWith(2, "inspect_unknown_run", { runId: "run_1" });
+    expect(api.invoke).toHaveBeenNthCalledWith(3, "resolve_unknown_run", { runId: "run_1", userConfirmed: true });
   });
 
   it("passes the confirmed task request to native IPC and replays ordered, deduplicated run events", async () => {
@@ -108,6 +123,7 @@ describe("runtime service adapter", () => {
       id: "run_1", requestId: input.requestId, taskId: "task_1", providerId: "claude",
       state: "pending", outcome: null, startedAt: null, finishedAt: null, exitCode: null,
       summary: null, lastSequence: 2, outputTruncated: false, processId: null, errorCode: null,
+      recoveryStatus: "none", recoveryCheckedAt: null,
     };
     api.invoke.mockResolvedValueOnce({ task, run });
     await expect(services.execution.startReadOnlyTask(input)).resolves.toEqual({ task, run });
