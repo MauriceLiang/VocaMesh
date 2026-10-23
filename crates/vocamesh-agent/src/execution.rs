@@ -24,7 +24,11 @@ pub struct ExecutionEnvironment(Vec<(OsString, OsString)>);
 
 impl ExecutionEnvironment {
     pub fn current() -> Self {
-        const ALLOWED: &[&str] = &[
+        Self::current_for(Provider::Claude)
+    }
+
+    pub fn current_for(provider: Provider) -> Self {
+        const CLAUDE_ALLOWED: &[&str] = &[
             "PATH",
             "HOME",
             "USER",
@@ -41,8 +45,24 @@ impl ExecutionEnvironment {
             "NO_COLOR",
             "CLAUDE_CONFIG_DIR",
         ];
+        const CODEX_ALLOWED: &[&str] = &[
+            "PATH",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "NO_COLOR",
+        ];
+        let allowed = match provider {
+            Provider::Claude => CLAUDE_ALLOWED,
+            Provider::Codex => CODEX_ALLOWED,
+            Provider::Opencode => &[],
+        };
         Self(
-            ALLOWED
+            allowed
                 .iter()
                 .filter_map(|key| std::env::var_os(key).map(|value| (OsString::from(key), value)))
                 .collect(),
@@ -322,7 +342,7 @@ pub fn parse_stream_json(line: &[u8]) -> ClaudeOutput {
     }
 }
 
-fn safe_output(text: &str) -> String {
+pub(crate) fn safe_output(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let suspicious = [
         "sk-ant-",

@@ -1,5 +1,13 @@
 # 安全边界
 
+## v0.7 Provider 独立执行门禁
+
+Claude 与 Codex 的探测、认证状态和 Runtime 策略分开。Claude 的策略阻断码仍为 execution.managed-policy-unverified；Codex 有独立的 execution.codex-safety-unverified，表示其 CLI 配置/插件/MCP、凭据、文件访问、进程与网络出口边界尚未证明。OpenCode 仍因没有 Adapter 返回 execution.adapter-unavailable。已安装、版本兼容、Claude 已认证或 Adapter 存在均不代表 Provider 可执行。
+
+Codex Adapter 的 fake CLI 闭环只验证固定参数、有限 JSONL 解析与共享 Task/Run/Event 生命周期。生产 Runtime 在策略门禁处拒绝 Codex，且拒绝发生在保存 Task/Run 之前。Codex 子进程不会继承 HOME 等常见 Home 环境变量；此措施不能代替 OS 沙箱，因为 CLI 可能从系统用户信息、配置目录、凭据代理或其它进程/网络机制获得访问。--sandbox read-only 只约束 Codex 自身命令运行沙箱，不证明整个 CLI 进程的文件、凭据、Hook、子进程和网络副作用都受控。
+
+Claude claude auth status 认证状态只基于官方规定的 JSON authMethod 与退出码；VocaMesh 不读取凭据正文，也不保存原始输出。一次经授权的本机只读探测对 Claude Code 2.1.296 得到 authenticated/exit 0；这只证明 CLI 状态分类，不解除 managed hooks 的执行门禁。威胁模型、隔离路线及未执行 PoC 见 [Claude 隔离威胁模型](security/claude-isolation-threat-model.md) 和 [ADR 0001](adr/0001-agent-execution-boundary.md)。
+
 ## v0.5 本机工具发现边界
 
 本机 CLI 发现只检查进程 `PATH` 和固定的 macOS 标准目录，不读取 Shell profile、不递归扫描 Home、不访问认证配置或凭据文件。每个候选必须与 Provider 的可执行文件名匹配；手动路径还必须是绝对路径、普通文件且可执行。常见 symlink 保留用于展示的输入路径，并单独校验 canonical 目标。版本探测仅直接启动所选二进制并传入固定 `--version`，不经 Shell；超时、输出大小和错误返回均受限制。

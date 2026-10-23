@@ -143,7 +143,7 @@ function sourceText(source: string | null): string {
         <p class="v-tiny v-secondary" :style="{ margin: 0, lineHeight: 1.55 }">
           CLI 发现、版本、认证、适配器能力和 Runtime 就绪分别显示。认证未知不等于未登录；已登录也不代表 VocaMesh 当前允许执行。设为偏好只保存选择。
         </p>
-        <div v-for="(step, index) in ['安装 CLI：在官方渠道安装后回到本页重新扫描。', 'Claude Code 登录状态仅通过固定的只读探测判断；其他 CLI 当前不读取登录状态。', '只有具备适配器且版本有效的工具能设为偏好；真实执行仍需 Runtime 全部检查通过。']" :key="index" class="flex items-start gap-[9px]">
+        <div v-for="(step, index) in ['安装 CLI：在官方渠道安装后回到本页重新扫描。', 'Claude Code 登录状态只通过固定只读探测判断；Codex 已有 JSONL 适配器，但认证与独立安全边界未证明前保持阻断。', '偏好选择不授予运行权限；每个 Provider 都必须通过 Runtime 的独立安全检查。']" :key="index" class="flex items-start gap-[9px]">
           <span class="grid h-[18px] w-[18px] place-items-center rounded-full text-[10px] font-semibold" :style="{ background: 'var(--bg-subtle)' }">{{ index + 1 }}</span>
           <span class="v-tiny v-muted" :style="{ lineHeight: 1.5 }">{{ step }}</span>
         </div>

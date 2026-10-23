@@ -120,7 +120,7 @@ export const executionCheckLabel = (id: ExecutionCheckId): string => {
     case "platform": return "平台支持";
     case "cliDiscovery": return "CLI 发现";
     case "cliVersion": return "CLI 版本";
-    case "authentication": return "Claude Code 认证";
+    case "authentication": return "Provider 认证";
     case "managedPolicy": return "托管策略";
     case "taskStart": return "任务启动许可";
   }
@@ -140,6 +140,7 @@ export const executionReasonText = (code: string | null): string => {
   if (!code) return "无额外阻断原因";
   const labels: Record<string, string> = {
     "execution.managed-policy-unverified": "当前组织托管执行策略尚未核验",
+    "execution.codex-safety-unverified": "Codex 的配置、凭据、文件、进程和网络安全边界尚未证明",
     "execution.platform-unsupported": "当前平台的进程安全策略未通过验证",
     "execution.auth-required": "Claude Code CLI 尚未登录",
     "execution.auth-unknown": "无法确认 Claude Code 登录状态",
@@ -183,6 +184,9 @@ export const toolRuntimeMeta = (ready: boolean, reasonCode: string | null): Stat
   if (ready) return { label: "Runtime 可执行", tone: "success", icon: "check" };
   if (reasonCode === "execution.managed-policy-unverified") {
     return { label: "Runtime 被策略阻断", tone: "blocked", icon: "alert" };
+  }
+  if (reasonCode === "execution.codex-safety-unverified") {
+    return { label: "Runtime 被 Codex 安全策略阻断", tone: "blocked", icon: "alert" };
   }
   if (reasonCode === "execution.platform-unsupported") {
     return { label: "Runtime 不支持此平台", tone: "failure", icon: "x" };

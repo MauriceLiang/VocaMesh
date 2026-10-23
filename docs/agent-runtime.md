@@ -1,5 +1,15 @@
 # 本机 Agent CLI 运行时
 
+## v0.7 ProviderRunner 与 Codex Adapter（当前）
+
+Runtime 通过静态 Provider 分发使用统一的 ProviderRunner；ClaudeCodeRunner 复用既有 ClaudeCli 参数、探测和 JSONL 解析，任务生命周期仍只有一个 Runtime、StartGate、SQLite schema v3、停止/超时和 Unknown Run 恢复实现。CodexCliRunner 独立校验可执行文件、版本及当前 exec --help 必需选项，不复用 Claude 的认证或安全结论；OpenCode 没有 Runner。
+
+Codex CLI 版本 0.162.1 和当前 codex exec --help 只读探测已检查。启动命令用独立参数构造 codex exec --json --sandbox read-only --ignore-user-config --ignore-rules --ephemeral --cd <快照目录> -，Prompt 经 stdin 传递，不经过 Shell。JSONL 只接受已知 thread/turn/item 事件；只提取 agent_message 文本，完成必须同时具备允许的摘要事件、turn.completed 及零退出码。失败、缺少协议终态、未知/畸形/超长事件均不能成功；原始未知事件和错误内容不持久化。
+
+Codex 子进程环境不继承 HOME、USERPROFILE、APPDATA、LOCALAPPDATA 和 CODEX_HOME，但这不证明 CLI 无法通过系统用户信息或其它机制发现配置、凭据、插件/MCP、可读文件、子进程或网络出口。Codex 认证保持 Unsupported；生产 readiness 使用独立的 execution.codex-safety-unverified，启动入口在创建 Task/Run 前重查并阻断。真实 Codex 任务未运行。测试专用策略只在 cfg(test) 构建中存在。
+
+Claude 认证探测的当前机器可读契约记录于官方 [Claude Code CLI usage 文档](https://code.claude.com/docs/en/cli-usage)：固定命令输出 JSON 的 authMethod，退出码 0 表示已登录、1 表示未登录；已知方法为 none、claude.ai、oauth_token、api_key、api_key_helper、third_party。解析器只在“退出码 0 + 已知非 none 方法”时返回已认证，或“退出码 1 + none”时返回未认证；矛盾、未知、格式错误均返回 unknown。经一次明确授权，本机 Claude Code 2.1.296 的只读 claude auth status 分类为 authenticated、退出码 0；原始 stdout/stderr 未保存，configDirectory 等其它字段不读取。认证成功不解除 Claude 的 managed policy 门禁。
+
 ## v0.5 本机工具发现与能力状态
 
 Rust Core 的 Provider 能力表是 Claude Code、Codex CLI、OpenCode 的单一能力来源：包含 Provider ID、显示名、可执行文件名、发现/版本探测能力、VocaMesh 执行适配器、认证探测能力、可证明的最低版本和稳定阻断原因。Claude Code 的最低版本为 `2.1.259`；Codex/OpenCode 只报告实际解析到的版本，不据此推断兼容执行。当前只有 Claude Code 有适配器。

@@ -49,14 +49,54 @@ const optionsError = ref<string | null>(null);
 const nativeTitle = ref("只读目录分析");
 const nativePrompt = ref("请总结所选工作目录的主要结构和用途。只根据实际读取到的内容回答。不要修改文件或执行命令。");
 const nativeWorkspace = ref("");
+const nativeProvider = ref<"claude" | "codex">("claude");
 const nativeConsent = ref(false);
 const nativeReadiness = ref<ExecutionReadiness | null>(null);
 const nativeLoading = ref(false);
 const nativeAuthMeta = computed(() => toolAuthMeta(
   nativeReadiness.value?.authState ?? "unknown",
-  nativeReadiness.value?.checks.find((check) => check.id === "authentication")?.reasonCode,
+  nativeReadiness.value?.checks?.find((check) => check.id === "authentication")?.reasonCode,
 ));
-const nativeTool = computed(() => tools.tools.find((tool) => tool.id === "claude") ?? null);
+const nativeTool = computed(() => tools.tools.find((tool) => tool.id === nativeProvider.value) ?? null);
+const nativeProviderName = computed(() => nativeProvider.value === "claude" ? "Claude Code" : "Codex CLI");
+const nativeProviderItems = [
+  { value: "claude", label: "Claude Code" },
+  { value: "codex", label: "Codex CLI · 当前被安全策略阻断" },
+];
+const nativeSubtitle = computed(() => nativeProviderName.value + " 本机只读任务；仅在该 Provider 的 Runtime 策略、CLI 与认证检查全部通过时可提交。");
+
+function storageUnavailableReadiness(provider: "claude" | "codex"): ExecutionReadiness {
+  const reasonCode = "storage.read-failed";
+  const policyReasonCode = provider === "claude"
+    ? "execution.managed-policy-unverified"
+    : "execution.codex-safety-unverified";
+  return {
+    ready: false,
+    version: null,
+    authState: "unknown",
+    message: "无法读取本机执行安全状态",
+    reasonCode,
+    policyStatus: "unverified",
+    checks: [
+      { id: "localStorage", status: "failed", reasonCode },
+      { id: "activeRun", status: "unknown", reasonCode },
+      { id: "processState", status: "unknown", reasonCode },
+      { id: "platform", status: "unknown", reasonCode: "execution.platform-unknown" },
+      { id: "cliDiscovery", status: "unknown", reasonCode: "execution.cli-unknown" },
+      { id: "cliVersion", status: "unknown", reasonCode: "execution.cli-unknown" },
+      { id: "authentication", status: "unknown", reasonCode: "execution.auth-unknown" },
+      { id: "managedPolicy", status: "blocked", reasonCode: policyReasonCode },
+      { id: "taskStart", status: "blocked", reasonCode },
+    ],
+    blockers: [
+      { check: "localStorage", reasonCode },
+      { check: "activeRun", reasonCode },
+      { check: "processState", reasonCode },
+      { check: "managedPolicy", reasonCode: policyReasonCode },
+    ],
+  };
+}
+
 const preferredToolName = computed(() => {
   if (!tools.defaultToolId) return "未设置";
   return tools.tools.find((tool) => tool.id === tools.defaultToolId)?.name ?? tools.defaultToolId;
@@ -82,42 +122,25 @@ async function prepare(): Promise<void> {
     nativePrompt.value = props.initialDescription?.trim() ? props.initialDescription : "请总结所选工作目录的主要结构和用途。只根据实际读取到的内容回答。不要修改文件或执行命令。";
     if (!workspaces.workspaces.length) await workspaces.load();
     nativeWorkspace.value = workspaces.workspaces.find((item) => item.name === props.defaultWorkspace)?.path ?? "";
+    nativeProvider.value = "claude";
     nativeConsent.value = false;
     nativeReadiness.value = null;
     nativeLoading.value = true;
+    let requestedProvider = nativeProvider.value;
     try {
       if (!tools.tools.length) await tools.load();
-      nativeReadiness.value = await services.execution.readiness();
+      requestedProvider = nativeProvider.value;
+      const readiness = await services.execution.readiness(requestedProvider);
+      if (nativeProvider.value === requestedProvider) nativeReadiness.value = readiness;
     }
     catch {
-      const reasonCode = "storage.read-failed";
-      nativeReadiness.value = {
-        ready: false,
-        version: null,
-        authState: "unknown",
-        message: "无法读取本机执行安全状态",
-        reasonCode,
-        policyStatus: "unverified",
-        checks: [
-          { id: "localStorage", status: "failed", reasonCode },
-          { id: "activeRun", status: "unknown", reasonCode },
-          { id: "processState", status: "unknown", reasonCode },
-          { id: "platform", status: "unknown", reasonCode: "execution.platform-unknown" },
-          { id: "cliDiscovery", status: "unknown", reasonCode: "execution.cli-unknown" },
-          { id: "cliVersion", status: "unknown", reasonCode: "execution.cli-unknown" },
-          { id: "authentication", status: "unknown", reasonCode: "execution.auth-unknown" },
-          { id: "managedPolicy", status: "blocked", reasonCode: "execution.managed-policy-unverified" },
-          { id: "taskStart", status: "blocked", reasonCode },
-        ],
-        blockers: [
-          { check: "localStorage", reasonCode },
-          { check: "activeRun", reasonCode },
-          { check: "processState", reasonCode },
-          { check: "managedPolicy", reasonCode: "execution.managed-policy-unverified" },
-        ],
-      };
+      if (nativeProvider.value === requestedProvider) {
+        nativeReadiness.value = storageUnavailableReadiness(requestedProvider);
+      }
     }
-    finally { nativeLoading.value = false; }
+    finally {
+      if (nativeProvider.value === requestedProvider) nativeLoading.value = false;
+    }
     return;
   }
   description.value = props.initialDescription?.trim() ? props.initialDescription : defaultDescription;
@@ -179,6 +202,23 @@ function submit(): void {
   else emit("submit", { ...base, mode: "custom" });
 }
 
+async function changeNativeProvider(value: string): Promise<void> {
+  if (value !== "claude" && value !== "codex") return;
+  const requestedProvider = value;
+  nativeProvider.value = requestedProvider;
+  nativeLoading.value = true;
+  try {
+    const readiness = await services.execution.readiness(requestedProvider);
+    if (nativeProvider.value === requestedProvider) nativeReadiness.value = readiness;
+  } catch {
+    if (nativeProvider.value === requestedProvider) {
+      nativeReadiness.value = storageUnavailableReadiness(requestedProvider);
+    }
+  } finally {
+    if (nativeProvider.value === requestedProvider) nativeLoading.value = false;
+  }
+}
+
 async function chooseNativeWorkspace(): Promise<void> {
   try {
     const path = await services.execution.selectWorkspaceDirectory();
@@ -196,7 +236,7 @@ async function submitNative(): Promise<void> {
       requestId: crypto.randomUUID(),
       title: nativeTitle.value.trim(),
       prompt: nativePrompt.value.trim(),
-      providerId: "claude",
+      providerId: nativeProvider.value,
       workspacePath: nativeWorkspace.value,
       consent: nativeConsent.value,
     });
@@ -214,7 +254,7 @@ async function submitNative(): Promise<void> {
   <VocaDialog
     :model-value="modelValue"
     title="创建任务"
-    :subtitle="isNative ? '本机 Claude Code 只读任务；仅在运行策略、CLI 与认证检查全部通过时可提交。' : mode === 'custom' ? '计划编辑尚未实现；此模式只会创建待配置占位任务，不会开始执行。' : '提交后先进入排队，运行环境检查通过才会开始执行。'"
+    :subtitle="isNative ? nativeSubtitle : mode === 'custom' ? '计划编辑尚未实现；此模式只会创建待配置占位任务，不会开始执行。' : '提交后先进入排队，运行环境检查通过才会开始执行。'"
     :footer-hint="isNative ? '启动前必须通过运行策略检查并由你确认；Prompt 和读取到的内容可能发送至模型提供方。' : undefined"
     :width="760"
     @update:model-value="emit('update:modelValue', $event)"
@@ -230,8 +270,9 @@ async function submitNative(): Promise<void> {
       </div>
       <div class="v-field">
         <span class="lbl">Provider</span>
+        <VocaSelect v-model="nativeProvider" :items="nativeProviderItems" aria-label="执行 Provider" :disabled="nativeLoading" @update:model-value="changeNativeProvider" />
         <div class="v-card v-panel">
-          <span class="v-small">Claude Code · 本机 CLI</span>
+          <span class="v-small">{{ nativeProviderName }} · 本机 CLI</span>
           <span class="v-tiny v-muted">偏好工具：{{ preferredToolName }}；偏好不会绕过 Runtime 检查。</span>
           <div v-if="nativeTool" class="flex flex-wrap gap-[6px]">
             <VocaStatus :meta="toolDiscoveryMeta(nativeTool.discoveryStatus)" />
@@ -241,7 +282,7 @@ async function submitNative(): Promise<void> {
             <VocaStatus :meta="toolRuntimeMeta(nativeTool.runtimeReady, nativeTool.runtimeReasonCode)" />
           </div>
           <span v-if="nativeTool?.runtimeReasonCode" class="v-tiny v-muted">Runtime 原因：{{ nativeTool.runtimeReasonCode }}</span>
-          <span class="v-tiny v-muted">Codex 和 OpenCode 本阶段仅支持发现，不支持真实执行。</span>
+          <span class="v-tiny v-muted">{{ nativeProvider === 'codex' ? 'Codex JSONL 适配器已接入统一 Runtime；配置、凭据、文件、进程和网络边界未证明前，真实执行保持禁用。' : 'OpenCode 当前仅支持发现；Claude Code 仍受组织托管策略门禁约束。' }}</span>
         </div>
       </div>
       <div class="v-field">
@@ -253,20 +294,21 @@ async function submitNative(): Promise<void> {
       </div>
       <div class="v-banner is-neutral" :style="{ alignItems: 'flex-start' }">
         <AlertTriangle :size="13" />
-        <span class="v-tiny" :style="{ lineHeight: 1.5 }">只读工具白名单：Read、Glob、Grep。Shell、写入、MCP 和子 Agent 被禁用。VocaMesh 会排除常见凭据目录/文件；发现符号链接或无法安全复制的文件时会阻止任务，并在应用数据目录创建临时快照。读取到的文件、Prompt 和输出可能发送给 Claude 模型提供方并保存在本机任务历史中。规则无法识别所有秘密，请勿在 Prompt 中填写密码或 Token。</span>
+        <span class="v-tiny" :style="{ lineHeight: 1.5 }">当前执行范围为只读快照，不向原工作目录写入；读取到的文件、Prompt 和输出可能发送给 {{ nativeProviderName }} 模型提供方并保存在本机任务历史中。目录过滤无法识别所有秘密，请勿在 Prompt 中填写密码或 Token。</span>
       </div>
       <label class="flex items-start gap-2 text-[11.5px]">
         <input v-model="nativeConsent" type="checkbox" :disabled="nativeLoading" />
-        <span>我确认所选目录和只读范围，并同意将任务所需内容发送给 Claude 模型提供方；我知道 Prompt、结果和目录路径会保存到本机应用数据。</span>
+        <span>我确认所选目录和只读范围，并同意将任务所需内容发送给当前 Provider 的模型提供方；我知道 Prompt、结果和目录路径会保存到本机应用数据。</span>
       </label>
       <div class="v-banner" :class="nativeReadiness?.ready ? 'is-neutral' : 'is-blocked'">
-        <span class="v-tiny">{{ nativeLoading ? '正在检查组织托管策略、CLI 版本与登录状态…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
+        <span class="v-tiny">{{ nativeLoading ? '正在检查当前 Provider 的版本、认证与独立执行策略…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
         <span v-if="nativeReadiness?.reasonCode" class="v-mono v-tiny">{{ nativeReadiness.reasonCode }}</span>
       </div>
       <div v-if="nativeReadiness" class="v-card v-panel" :style="{ gap: '7px' }">
         <span class="v-small">认证与执行策略</span>
         <span class="v-tiny">认证状态：{{ nativeAuthMeta.label }}。认证未知不等于未登录；已登录也不代表 VocaMesh 当前允许执行。</span>
         <span v-if="nativeReadiness.authState === 'authenticated' && nativeReadiness.policyStatus === 'unverified'" class="v-tiny">Claude Code 已登录，但执行仍被托管策略阻断。</span>
+        <span v-else-if="nativeReadiness.policyStatus === 'unverified' && nativeProvider === 'codex'" class="v-tiny">Codex 独立安全边界尚未核验，执行仍被阻断；这不代表认证失败。</span>
         <span v-else-if="nativeReadiness.policyStatus === 'unverified'" class="v-tiny">托管策略尚未核验，执行仍被阻断；这不代表用户未登录。</span>
         <div v-for="check in nativeReadiness.checks" :key="check.id" class="flex flex-wrap items-center gap-[7px]">
           <span class="v-tiny">{{ executionCheckLabel(check.id) }}</span>

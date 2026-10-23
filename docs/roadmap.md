@@ -58,4 +58,10 @@
 
 随后执行 `pnpm --dir frontend tauri build --bundles app --no-sign` 成功，生成 arm64 `target/release/bundle/macos/VocaMesh.app`（14.63 MiB，未签名）。没有启动窗口，GUI 仍为 BLOCKED。
 
-代码提交 `864f2c1dfdd1ce6a56a64d052c2ad700009b8129` 已推送；PR [#9](https://github.com/MauriceLiang/VocaMesh/pull/9) 已创建，待审阅。
+原始代码提交 `864f2c1dfdd1ce6a56a64d052c2ad700009b8129` 已推送到 PR [#9](https://github.com/MauriceLiang/VocaMesh/pull/9)。PR #10 合入 main 后造成重叠改动；PR #9 分支现已合入 main 的 `65e8fa5`，冲突修复及其验证结果见 `docs/implementation-report.md`。
+
+## v0.7 ProviderRunner 与 Codex fake 执行闭环
+
+分支 feature/v0.7-provider-runner-codex 基于制定文档的 origin/main 基线 76cafd0266ef15ec88c609eb3e1847b5156670f1。统一 ProviderRunner 接管 Claude/Codex 的静态分发，保持一个 Runtime 和 SQLite schema v3；Codex 具备 codex exec --json Adapter、Provider-aware readiness、Tauri/前端 Provider 选择及共享 Task/Run/Event、停止、超时和恢复 fake 覆盖。Codex 真实任务在 execution.codex-safety-unverified 阻断；Claude 仍由 execution.managed-policy-unverified 阻断。OpenCode 暂无 Adapter。
+
+本轮 Claude auth status 一次只读探测的脱敏分类为 authenticated，退出码 0；没有发送模型 Prompt。Claude 隔离威胁模型与路线比较已写入 docs/security/claude-isolation-threat-model.md，但未运行系统级 PoC；macOS GUI、真实 CLI 模型任务、Windows、Linux、Playwright E2E 和远端 CI 未验收。自动化与 app 构建结果记录在 docs/implementation-report.md；本地自动化不能替代这些验收项。

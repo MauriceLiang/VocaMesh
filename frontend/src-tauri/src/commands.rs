@@ -5,7 +5,7 @@ use vocamesh_core::{
     derive_tool_state, AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings,
     CatalogStatus, CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionCheckId,
     ExecutionCheckStatus, ExecutionPolicyStatus, ExecutionReadiness, ExecutionRequest, LocalTool,
-    RecoveryInspection, RecoveryResolution, RunEvent, RunRecord, ScanPhase, ServiceError,
+    Provider, RecoveryInspection, RecoveryResolution, RunEvent, RunRecord, ScanPhase, ServiceError,
     TaskRecord, TeamMemberRecord, TeamRecord, ToolIntegrationStatus, ToolScanEvent,
     UnknownRunSummary, UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput,
     WorkspaceRecord,
@@ -107,15 +107,14 @@ pub(crate) async fn scan_tools(
             return Err(ERR_SCAN_SUPERSEDED);
         }
         runtime.scan_tools().map(|tools| {
-            let readiness = execution.as_ref().and_then(|execution| {
-                tools
-                    .iter()
-                    .find(|tool| tool.id == "claude")
-                    .map(|tool| execution.readiness_for_tool(tool))
-            });
             tools
                 .into_iter()
-                .map(|tool| apply_runtime_readiness(tool, readiness.as_ref()))
+                .map(|tool| {
+                    let readiness = execution
+                        .as_ref()
+                        .map(|execution| execution.readiness_for_tool(&tool));
+                    apply_runtime_readiness(tool, readiness.as_ref())
+                })
                 .collect()
         })
     })
@@ -448,11 +447,15 @@ pub(crate) async fn update_appearance_settings(
 #[tauri::command]
 pub(crate) async fn get_execution_readiness(
     state: State<'_, AppState>,
+    provider_id: String,
 ) -> Result<ExecutionReadiness, ServiceError> {
+    let provider = provider_id.parse::<Provider>().map_err(|_| {
+        ServiceError::new("execution.provider-not-supported", "Provider 当前不可执行")
+    })?;
     let Some(runtime) = state.execution.clone() else {
         return Ok(ExecutionReadiness::storage_unavailable(ERR_STORAGE.message));
     };
-    tauri::async_runtime::spawn_blocking(move || Ok(runtime.readiness()))
+    tauri::async_runtime::spawn_blocking(move || Ok(runtime.readiness_for(provider)))
         .await
         .map_err(|_| ERR_RUNTIME)?
 }
@@ -668,14 +671,14 @@ mod tool_readiness_tests {
     }
 
     #[test]
-    fn runtime_readiness_does_not_make_discovery_only_provider_executable() {
+    fn codex_adapter_is_shown_as_blocked_until_its_own_policy_is_proven() {
         let readiness = ExecutionReadiness {
-            ready: true,
-            version: Some("2.1.296".into()),
-            auth_state: AuthenticationState::Authenticated,
-            message: "ready".into(),
-            reason_code: None,
-            policy_status: ExecutionPolicyStatus::Verified,
+            ready: false,
+            version: Some("0.162.1".into()),
+            auth_state: AuthenticationState::Unsupported,
+            message: "Codex policy unknown".into(),
+            reason_code: Some("execution.codex-safety-unverified".into()),
+            policy_status: ExecutionPolicyStatus::Unverified,
             checks: Vec::new(),
             blockers: Vec::new(),
         };
@@ -688,12 +691,12 @@ mod tool_readiness_tests {
         assert!(!codex.runtime_ready);
         assert_eq!(
             codex.integration_status,
-            ToolIntegrationStatus::DiscoveryOnly
+            ToolIntegrationStatus::BlockedByPolicy
         );
         assert_eq!(codex.auth_state, AuthenticationState::Unsupported);
         assert_eq!(
             codex.runtime_reason_code.as_deref(),
-            Some("tool.adapter-unavailable")
+            Some("execution.codex-safety-unverified")
         );
         assert_eq!(codex.state, ToolState::Undetectable);
     }
