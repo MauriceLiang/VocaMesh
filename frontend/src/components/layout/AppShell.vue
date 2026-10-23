@@ -7,9 +7,11 @@ import SidebarNav from "./SidebarNav.vue";
 import TopBar from "./TopBar.vue";
 import CommandPalette from "./CommandPalette.vue";
 import VocaToasts from "@/components/ui/VocaToasts.vue";
+import VocaButton from "@/components/ui/VocaButton.vue";
 import { useApprovalsStore } from "@/stores/approvals";
 import { useNotificationsStore } from "@/stores/notifications";
 import { useTeamsStore } from "@/stores/teams";
+import { useAppStore } from "@/stores/app";
 import { useServices } from "@/services/adapters";
 
 const route = useRoute();
@@ -21,6 +23,7 @@ const plain = computed(() => route.meta.plain === true);
 const approvals = useApprovalsStore();
 const notifications = useNotificationsStore();
 const teams = useTeamsStore();
+const app = useAppStore();
 const services = useServices();
 
 onMounted(async () => {
@@ -51,6 +54,10 @@ useEventListener(window, "keydown", (event: KeyboardEvent) => {
           <TopBar :page-title="pageTitle" :on-open-palette="() => (paletteOpen = true)" />
           <div v-if="services.mode === 'tauri'" class="v-banner is-neutral mx-4 mt-2" role="status">
             {{ services.sourceLabel }}
+          </div>
+          <div v-if="services.mode === 'tauri' && app.settingsError" class="v-banner is-failure mx-4 mt-2" role="alert">
+            <span class="flex-1">{{ app.settingsError }}</span>
+            <VocaButton size="sm" @click="app.loadSettings()">重试读取设置</VocaButton>
           </div>
           <div class="v-workspace">
             <RouterView v-slot="{ Component }">

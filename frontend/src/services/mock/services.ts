@@ -526,12 +526,31 @@ export function createMockServices(): Services {
       db.workspaces = [...db.workspaces, workspace];
       return clone(workspace);
     },
+    async renameWorkspace(id, name) {
+      const workspace = db.workspaces.find((item) => item.id === id);
+      if (!workspace) throw new ServiceError("工作空间不存在", "workspace.not-found", id);
+      const normalized = name.trim().toLocaleLowerCase();
+      if (!normalized) throw new ServiceError("工作空间名称不能为空", "workspace.invalid-input");
+      if (db.workspaces.some((item) => item.id !== id && item.name.trim().toLocaleLowerCase() === normalized)) {
+        throw new ServiceError("同名工作空间已存在", "workspace.duplicate", name);
+      }
+      const oldName = workspace.name;
+      workspace.name = name.trim();
+      db.teams.forEach((team) => { if (team.workspace === oldName) team.workspace = workspace.name; });
+      return clone(workspace);
+    },
     async updateBoundaries(id, input) {
       const workspace = db.workspaces.find((item) => item.id === id);
       if (!workspace) throw new ServiceError("工作空间不存在", "workspace.not-found", id);
       workspace.read = input.read;
       workspace.write = input.write;
       return clone(workspace);
+    },
+    async archiveWorkspace(id) {
+      const workspace = db.workspaces.find((item) => item.id === id);
+      if (!workspace) throw new ServiceError("工作空间不存在", "workspace.not-found", id);
+      if (db.teams.some((team) => team.workspace === workspace.name)) throw new ServiceError("该工作空间仍被团队引用", "workspace.in-use");
+      db.workspaces = db.workspaces.filter((item) => item.id !== id);
     },
     async resolveConflict(id) {
       const workspace = db.workspaces.find((item) => item.id === id);

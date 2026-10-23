@@ -4,8 +4,8 @@ import type { ApprovalDecision, ApprovalRequest, ApprovalState } from "@/types";
  * 审批服务。
  *
  * 用途：高风险操作的授权（覆盖写入、删除、命令执行、访问网络）。
- * 当前实现：MockApprovalService。
- * 未来实现：Rust Core 的授权引擎；必须支持作用域与撤销能力判定。
+ * 浏览器实现：MockApprovalService。
+ * Tauri：本阶段未接入原生审批/授权引擎；不能通过此服务批准真实执行。
  *
  * 约束：
  * - 默认不允许；超时不会变成批准。
@@ -27,7 +27,7 @@ export interface ApprovalService {
    * 返回：更新后的审批记录（含 history 追加条目）。
    * 错误：`approval.already-decided`、`approval.expired`、`approval.scope-unavailable`。
    * Mock：允许 → 关联任务恢复 running；拒绝 → 任务 needs-attention。
-   * Rust：写入审计记录；验证作用域仍然有效后才放行执行。
+   * Tauri：不支持提交审批决定。
    */
   decide(id: string, decision: ApprovalDecision): Promise<ApprovalRequest>;
 

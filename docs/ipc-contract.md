@@ -6,6 +6,25 @@ Rust command 使用 snake_case；DTO JSON 使用 camelCase。界面和 Store 只
 
 | Command | 参数 | 返回 | 语义 |
 | --- | --- | --- | --- |
+| `get_catalog_status` | 无 | `CatalogStatus` | 返回 schema 版本和非归档 Agent/Workspace/Team 数量；独立于 execution readiness。 |
+| `list_agents` / `get_agent` | `{ id? }` | `AgentRole[]` / `AgentRole` | 查询本机角色配置，不扫描或启动 CLI。 |
+| `create_agent` | `{ input: CreateAgentInput }` | `AgentRole` | 校验 Provider/name 并落库，权限是配置草稿。 |
+| `update_agent` | `{ id, input: UpdateAgentInput }` | `AgentRole` | 更新配置、审计并递增 revision；可传 `expectedRevision`。 |
+| `set_agent_permissions` | `{ id, permissions, expectedRevision? }` | `AgentRole` | 独立保存权限草稿并检查 revision；不会改变 Runtime 能力。 |
+| `archive_agent` | `{ id }` | `void` | 活跃 Team 仍引用时返回 `agent.in-use`。 |
+| `list_workspaces` / `get_workspace` | `{ id? }` | `WorkspaceRecord[]` / `WorkspaceRecord` | 查询登记目录、路径可用状态、范围草稿和真实 Task 路径计数。 |
+| `create_workspace` | `{ input: CreateWorkspaceInput }` | `WorkspaceRecord` | 校验真实目录、规范路径和敏感范围后登记。 |
+| `update_workspace_scopes` | `{ id, input: UpdateWorkspaceScopesInput }` | `WorkspaceRecord` | 保存相对路径范围草稿并递增 revision；使用加载时的 `expectedRevision` 拒绝旧草稿覆盖新值。 |
+| `rename_workspace` | `{ id, name, expectedRevision? }` | `WorkspaceRecord` | 保持 Workspace ID 与 Team 关系，检查同名和 revision。 |
+| `archive_workspace` | `{ id }` | `void` | 活跃 Team 仍引用时返回 `workspace.in-use`；不删除 Task/Run 历史。 |
+| `list_teams` / `get_team` | `{ id? }` | `TeamRecord[]` / `TeamRecord` | 关系来自持久化成员 ID；显示数据从 Agent 记录派生。 |
+| `list_team_members` | `{ id }` | `TeamMemberRecord[]` | 读取指定团队成员。 |
+| `create_team` | `{ input: CreateTeamInput }` | `TeamRecord` | 创建单主管 Team，主管同时成为唯一根成员。 |
+| `update_team` | `{ id, input: UpdateTeamInput }` | `TeamRecord` | 更新名称/主管/Workspace；校验关系并递增 revision。 |
+| `add_team_member` | `{ id, input: AddTeamMemberInput }` | `TeamRecord` | 事务内校验直属主管、自指、重复成员与无环关系。 |
+| `remove_team_member` | `{ id, agentId }` | `TeamRecord` | 主管或仍有下属的成员不可移除。 |
+| `set_team_reports_to` | `{ id, agentId, reportsToAgentId }` | `TeamRecord` | 更新直属关系；同团队校验，无环失败时回滚。 |
+| `get_appearance_settings` / `update_appearance_settings` | 无 / `{ settings }` | `AppearanceSettings` | SQLite 持久化主题、密度、灰度预览和减少动态效果。 |
 | `select_workspace_directory` | 无 | `string \| null` | 原生目录选择；用户取消返回 `null`。 |
 | `get_execution_readiness` | 无 | `ExecutionReadiness` | 查询 Claude CLI 版本与受限认证状态；不启动任务。 |
 | `list_unknown_runs` | 无 | `UnknownRunSummary[]` | 列出 Unknown Run、任务标题与快照存在状态；不返回 PGID 或快照路径。 |
@@ -21,13 +40,15 @@ Rust command 使用 snake_case；DTO JSON 使用 camelCase。界面和 Store 只
 
 `ExecutionRequest` 包含 `requestId`、`title`、`prompt`、`providerId`、`workspacePath` 和用户确认的 `consent`。本阶段只接受 Provider `claude`。Runtime 将规范化路径、`read-only-filtered-snapshot` 授权范围和确认时间写入 Task。请求 ID 必须是 UUID；重复 ID 返回原记录，冲突载荷返回 `execution.request-duplicate`。
 
+Catalog DTO 使用 `camelCase`，所有时间为 Unix epoch 毫秒。Agent、Workspace、Team 使用稳定 ID；Team 成员的 `name`、`role`、Provider 与 `reportsToAgentId` 从已保存记录查询。Workspace 的 `pathAvailable=false` 表示登记路径当前丢失、不可访问或不再通过安全路径检查；记录仍保留，Team 新建或改绑必须选有效目录。Agent `permissions` 与 Workspace `scopes` 仅为草稿，不代表 Runtime 授权。Tauri 服务不会因为 CLI 探测失败而删除或伪造 Catalog 项。
+
 `TaskRecord` 包含标题、Prompt、Provider、规范化工作目录、任务状态、时间、当前 Run、授权范围和确认时间。`RunRecord` 包含独立 ID、请求 ID、Task ID、Provider、状态、结果、PID（运行时）、起止时间、退出码、摘要、事件序号、截断标记、稳定错误码、`recoveryStatus` 和 `recoveryCheckedAt`。PGID 仅留在后端数据库，不通过 IPC 暴露。`ExecutionReadiness.reasonCode` 区分策略、Unknown Run、CLI、认证、平台和存储阻断。事件字段为 `runId`、递增 `sequence`、时间戳、白名单 `kind` 和筛选后的文本。
 
 `RecoveryStatus` 为 `none`、`required`、`resolved`、`manual-required`。进程组检查状态为 `exited-candidate`、`still-running`、`cannot-verify`、`manual-required`；快照状态为 `exists`、`missing`、`cannot-verify`。进程组不存在只产生人工归档候选，不足以证明已脱离原进程组的后代已退出。前端不能传 PID、PGID、快照路径、检查结果或“进程已退出”布尔值；`userConfirmed` 只表示用户在系统进程管理工具完成人工核验，Runtime 会在写入前重新检查。
 
 `RecoveryResolution` 包含归档后的 `run` 和 `snapshotStatus`，使界面能区分快照已清理与清理未能确认。
 
-SQLite schema v2 通过事务性 v1→v2 migration 增加 PGID、恢复状态和最近检查时间；历史 Task/Run/Event 保持原样。恢复时数据库先提交 `recovery-confirmed-exited` 审计事件并将 Run 标为失败，之后才清理快照。清理失败保留已归档失败状态并追加固定的 `recovery-snapshot-cleanup-failed` 事件。操作幂等；任何仍未知的 Run 继续阻止新真实任务。
+SQLite schema v2 通过事务性 v1→v2 migration 增加 PGID、恢复状态和最近检查时间。v0.4 的事务性 v2→v3 migration 新增 Catalog 表；旧 Task/Run/Event、恢复字段与审计事件保持原样，未来版本拒绝打开。恢复时数据库先提交 `recovery-confirmed-exited` 审计事件并将 Run 标为失败，之后才清理快照。清理失败保留已归档失败状态并追加固定的 `recovery-snapshot-cleanup-failed` 事件。操作幂等；任何仍未知的 Run 继续阻止新真实任务。
 
 状态分别使用 `pending`、`starting`、`running`、`stop-requested`、`finished`、`crashed`、`unknown`。Task 面向 UI 映射为 `queued`、`starting`、`running`、`stop-pending`、`stopped`、`done`、`failed`、`unknown`。`finished` 的最终结果需结合 `outcome` 区分成功、停止和超时；Run 状态不会覆盖旧终态。
 
@@ -44,6 +65,9 @@ SQLite schema v2 通过事务性 v1→v2 migration 增加 PGID、恢复状态和
 
 Command 错误序列化为 `{ code, message }`，前端映射为 `ServiceError`。稳定错误包含：
 
+- `agent.not-found`、`agent.duplicate`、`agent.invalid-input`、`agent.in-use`、`agent.revision-conflict`；
+- `workspace.not-found`、`workspace.duplicate`、`workspace.path-missing`、`workspace.invalid-path`、`workspace.invalid-input`、`workspace.invalid-scope`、`workspace.in-use`、`workspace.revision-conflict`；
+- `team.not-found`、`team.duplicate`、`team.invalid-input`、`team.member-exists`、`team.member-not-found`、`team.self-management`、`team.cycle`、`team.supervisor-required`、`team.workspace-unavailable`、`team.revision-conflict`；
 - `execution.provider-not-supported`、`execution.cli-not-ready`、`execution.cli-not-found`、`execution.cli-incompatible`、`execution.auth-required`、`execution.auth-unknown`、`execution.workspace-invalid`、`execution.consent-required`、`execution.managed-policy-unverified`、`execution.already-running`、`execution.process-state-unknown`、`execution.request-duplicate`、`execution.invalid-request`；
 - `run.not-found`、`run.invalid-id`、`run.recovery-not-required`、`run.recovery-confirmation-required`、`run.recovery-process-present`、`run.recovery-path-invalid`、`run.stop-failed`、`run.stop-unconfirmed`；Run 持久化错误码还包括 `run.timeout`、`run.output-protocol-error`、`execution.spawn-failed`；
 - `storage.read-failed`、`storage.write-failed`、`storage.schema-unsupported`、`execution.runtime-failed`。

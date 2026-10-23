@@ -4,34 +4,43 @@ import { createMockServices } from "@/services/mock/services";
 import { createTauriToolScanEvents } from "@/services/tauri/events";
 import { createTauriToolService } from "@/services/tauri/tools";
 import { createTauriExecutionService, createTauriRunService, createTauriRuntimeEvents, createTauriTaskService } from "@/services/tauri/execution";
+import { createTauriAgentService } from "@/services/tauri/agents";
+import { createTauriTeamService } from "@/services/tauri/teams";
+import { createTauriWorkspaceService } from "@/services/tauri/workspaces";
+import { createTauriSettingsService } from "@/services/tauri/settings";
+import { createEmptyNativeNotificationService, createUnavailableApprovalService } from "@/services/tauri/unavailable";
 
 export type ServiceMode = "mock" | "tauri";
 
 export interface AppServices extends Services {
   mode: ServiceMode;
-  /** Tool discovery is real in desktop mode; other unimplemented domains remain demo data. */
+  /** Describes the active data source and capability boundary. */
   sourceLabel: string;
 }
 
 let instance: AppServices | null = null;
 
 export function createServices(mode: ServiceMode = (isTauri() ? "tauri" : "mock")): AppServices {
-  const mock = createMockServices();
-  if (mode === "tauri") {
-    const nativeEvents = createTauriToolScanEvents();
-    const execution = createTauriExecutionService();
-    return {
-      ...mock,
-      tools: createTauriToolService(),
-      tasks: createTauriTaskService(execution),
-      runs: createTauriRunService(execution),
-      events: createTauriRuntimeEvents(execution, mock.events, nativeEvents.subscribeToolScan),
-      execution,
-      mode: "tauri",
-      sourceLabel: "本机 Claude 只读任务、Run 与日志已接入；Agent、团队、审批等仍为演示数据",
-    };
-  }
-  return { ...mock, mode: "mock", sourceLabel: "Mock 演示数据" };
+  if (mode === "mock") return { ...createMockServices(), mode: "mock", sourceLabel: "Mock 演示数据" };
+
+  const nativeEvents = createTauriToolScanEvents();
+  const execution = createTauriExecutionService();
+  const tools = createTauriToolService();
+  return {
+    mode: "tauri",
+    sourceLabel: "本地配置与 Task/Run 数据已接入；真实执行仍受安全策略限制",
+    tools,
+    tasks: createTauriTaskService(execution),
+    runs: createTauriRunService(execution),
+    events: createTauriRuntimeEvents(execution, nativeEvents.subscribeToolScan),
+    execution,
+    agents: createTauriAgentService(),
+    teams: createTauriTeamService(),
+    workspaces: createTauriWorkspaceService(),
+    approvals: createUnavailableApprovalService(),
+    notifications: createEmptyNativeNotificationService(),
+    settings: createTauriSettingsService(),
+  };
 }
 
 /** Stores and pages use this boundary and never call native IPC directly. */

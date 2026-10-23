@@ -131,6 +131,16 @@ describe("tasks store", () => {
     expect(store.visibleTasks).toHaveLength(states.length);
   });
 
+  it("accepts the additional lifecycle states persisted by the native Runtime", () => {
+    const store = useTasksStore();
+    for (const state of ["starting", "stop-pending", "stopped", "partial", "unknown"] as const) {
+      const fixture = taskFixture(state, { state });
+      store.tasks = [fixture];
+      expect(store.setStateFilter(state)).toBe(true);
+      expect(store.visibleTasks).toEqual([fixture]);
+    }
+  });
+
   it("filters by creation time and combines date, state, workspace, executor, and search", () => {
     vi.useFakeTimers();
     const now = new Date("2026-10-22T00:00:00Z");

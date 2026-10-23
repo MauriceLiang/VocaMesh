@@ -40,8 +40,12 @@ export const useTeamsStore = defineStore("teams", () => {
     loading.value = true;
     try {
       teams.value = await services.teams.listTeams();
+      lastError.value = null;
       if (!selectedId.value && teams.value.length) selectedId.value = teams.value[0].id;
       layout();
+    } catch (err) {
+      lastError.value = err instanceof ServiceError ? err.message : "无法读取本机团队配置，请重试。";
+      app.toast(lastError.value, "failure");
     } finally {
       loading.value = false;
     }
@@ -130,11 +134,12 @@ export const useTeamsStore = defineStore("teams", () => {
     return apply(() => services.teams.setReportsTo(currentId(), agentId, reportsTo), "已更新汇报关系");
   }
 
-  async function updateTeam(patch: Partial<Pick<Team, "name" | "supervisorId" | "workspace">>): Promise<boolean> {
-    return apply(() => services.teams.updateTeam(currentId(), patch), "团队设置已保存");
+  async function updateTeam(patch: Partial<Pick<Team, "name" | "supervisorId" | "workspace" | "workspaceId">>): Promise<boolean> {
+    const current = selected.value;
+    return apply(() => services.teams.updateTeam(currentId(), { ...patch, expectedRevision: current?.revision }), "团队设置已保存");
   }
 
-  async function createTeam(input: { name: string; supervisorId: string; workspace: string }): Promise<Team | null> {
+  async function createTeam(input: { name: string; supervisorId: string; workspace: string; workspaceId?: string }): Promise<Team | null> {
     try {
       const team = await services.teams.createTeam(input);
       teams.value = [...teams.value, team];

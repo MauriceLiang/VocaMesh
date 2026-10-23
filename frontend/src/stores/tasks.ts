@@ -14,7 +14,8 @@ export type TaskFilter = {
 };
 
 const taskFilterStates = new Set<TaskFilterState>([
-  "all", "draft", "running", "waiting-approval", "queued", "paused", "needs-attention", "done", "failed",
+  "all", "draft", "queued", "starting", "running", "waiting-approval", "pause-pending", "paused",
+  "stop-pending", "stopped", "needs-attention", "partial", "done", "failed", "unknown",
 ]);
 
 const emptyFilter = (): TaskFilter => ({ state: "all", workspace: "全部", team: "全部", time: "all", query: "" });

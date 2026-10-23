@@ -9,28 +9,53 @@ import VocaStatus from "@/components/ui/VocaStatus.vue";
 import CreateTaskDialog from "./CreateTaskDialog.vue";
 import { useTasksStore } from "@/stores/tasks";
 import { useAgentsStore } from "@/stores/agents";
+import { useWorkspacesStore } from "@/stores/workspaces";
 import { taskStateMeta } from "@/lib/status";
 import { taskStateFilterOptions, taskTimeFilterOptions } from "@/lib/task-filters";
 import { useAppStore } from "@/stores/app";
+import { useServices } from "@/services/adapters";
 import type { CreateTaskInput } from "@/types";
 
 const router = useRouter();
 const app = useAppStore();
 const tasks = useTasksStore();
 const agents = useAgentsStore();
+const workspaces = useWorkspacesStore();
+const services = useServices();
+const isNative = services.mode === "tauri";
 const dialogOpen = ref(false);
 
-const stateItems = [...taskStateFilterOptions];
-const workspaceItems = ["全部", "research-2025", "vocab-ops", "release-2.4", "legal-docs"].map((value) => ({ label: value, value }));
+const nativeStateItems = [
+  { label: "全部", value: "all" },
+  { label: "排队中", value: "queued" },
+  { label: "启动中", value: "starting" },
+  { label: "执行中", value: "running" },
+  { label: "正在停止", value: "stop-pending" },
+  { label: "已停止", value: "stopped" },
+  { label: "已完成", value: "done" },
+  { label: "失败", value: "failed" },
+  { label: "状态未知", value: "unknown" },
+] as const;
+const stateItems = computed(() => isNative ? [...nativeStateItems] : [...taskStateFilterOptions]);
+const workspaceItems = computed(() => {
+  if (!isNative) return ["全部", "research-2025", "vocab-ops", "release-2.4", "legal-docs"].map((value) => ({ label: value, value }));
+  const registered = workspaces.workspaces.map((workspace) => ({ label: workspace.name, value: workspace.path }));
+  const registeredPaths = new Set(registered.map((item) => item.value));
+  const historical = [...new Set(tasks.tasks.map((task) => task.workspace))]
+    .filter((path) => !registeredPaths.has(path))
+    .map((path) => ({ label: `${path}（历史路径）`, value: path }));
+  return [{ label: "全部", value: "全部" }, ...registered, ...historical];
+});
 const teamItems = ["全部", "调研团队", "内容团队", "开发者团队"].map((value) => ({ label: value, value }));
 const timeItems = [...taskTimeFilterOptions];
-const stateLabel = computed(() => stateItems.find((item) => item.value === tasks.filter.state)?.label ?? "未知状态");
+const stateLabel = computed(() => stateItems.value.find((item) => item.value === tasks.filter.state)?.label ?? "未知状态");
+const workspaceLabel = computed(() => workspaceItems.value.find((item) => item.value === tasks.filter.workspace)?.label ?? tasks.filter.workspace);
 const timeLabel = computed(() => timeItems.find((item) => item.value === tasks.filter.time)?.label ?? "未知范围");
 
 const rows = computed(() => tasks.visibleTasks);
 
 onMounted(async () => {
-  await Promise.all([tasks.load(), agents.load()]);
+  await Promise.all([tasks.load(), agents.load(), ...(isNative ? [workspaces.load()] : [])]);
 });
 
 function openTask(id: string): void {
@@ -61,7 +86,9 @@ function formatCreatedAt(value: string): string {
   <div class="v-content">
     <PageHeader
       title="全部任务"
-      :subtitle="`${tasks.tasks.length} 个任务 · ${tasks.counters.running} 个执行中 · ${tasks.counters.waiting} 个等待你处理（当前工作在此管理；历史记录用于追溯已结束的 Run）`"
+      :subtitle="isNative
+        ? `${tasks.tasks.length} 个本机任务 · ${tasks.counters.running} 个执行中 · ${tasks.counters.waiting} 个等待处理`
+        : `${tasks.tasks.length} 个任务 · ${tasks.counters.running} 个执行中 · ${tasks.counters.waiting} 个等待你处理（当前工作在此管理；历史记录用于追溯已结束的 Run）`"
     >
       <template #actions>
         <VocaDropdown :items="stateItems" @select="setStateFilter">
@@ -70,6 +97,8 @@ function formatCreatedAt(value: string): string {
         <VocaButton variant="primary" @click="dialogOpen = true">新建任务</VocaButton>
       </template>
     </PageHeader>
+
+    <div v-if="isNative && workspaces.lastError" class="v-banner is-failure"><span class="flex-1">{{ workspaces.lastError }}</span><VocaButton size="sm" @click="workspaces.load()">重试工作空间</VocaButton></div>
 
     <div class="flex flex-wrap items-center gap-2">
       <label class="v-searchbox" :style="{ minWidth: '260px' }">
@@ -83,9 +112,9 @@ function formatCreatedAt(value: string): string {
         />
       </label>
       <VocaDropdown :items="workspaceItems" @select="(value) => (tasks.filter.workspace = value)">
-        <VocaButton size="sm">工作空间：{{ tasks.filter.workspace }}</VocaButton>
+        <VocaButton size="sm">工作空间：{{ workspaceLabel }}</VocaButton>
       </VocaDropdown>
-      <VocaDropdown :items="teamItems" @select="(value) => (tasks.filter.team = value)">
+      <VocaDropdown v-if="!isNative" :items="teamItems" @select="(value) => (tasks.filter.team = value)">
         <VocaButton size="sm">执行者：{{ tasks.filter.team }}</VocaButton>
       </VocaDropdown>
       <VocaDropdown :items="timeItems" @select="setTimeFilter">
@@ -105,7 +134,7 @@ function formatCreatedAt(value: string): string {
             <td><VocaStatus :meta="taskStateMeta(task.state)" /></td>
             <td>
               <div class="font-medium">{{ task.name }}</div>
-              <div class="v-tiny v-muted">{{ task.subtasks.filter((s) => s.state === "success").length }}/{{ task.subtasks.length }} 子任务 · {{ task.stateNote }}</div>
+              <div class="v-tiny v-muted">{{ task.nativeExecution ? task.stateNote : `${task.subtasks.filter((s) => s.state === "success").length}/${task.subtasks.length} 子任务 · ${task.stateNote}` }}</div>
             </td>
             <td class="v-mono v-tiny v-secondary">{{ task.workspace }}</td>
             <td class="v-small v-secondary">{{ task.team }}</td>
@@ -116,8 +145,8 @@ function formatCreatedAt(value: string): string {
           <tr v-if="!rows.length">
             <td colspan="7">
               <div class="v-empty">
-                <span class="text-[15px] font-semibold">没有匹配的任务</span>
-                <span class="v-small">试试清除筛选，或创建第一项任务。</span>
+                <span class="text-[15px] font-semibold">{{ isNative && !tasks.tasks.length ? "暂无本机任务" : "没有匹配的任务" }}</span>
+                <span class="v-small">{{ isNative && !tasks.tasks.length ? "本机安全策略当前阻止创建并执行任务；此列表不会填入演示记录。" : "试试清除筛选，或创建第一项任务。" }}</span>
               </div>
             </td>
           </tr>
@@ -125,7 +154,7 @@ function formatCreatedAt(value: string): string {
       </table>
     </div>
     <div v-if="app.isMock" class="v-tiny v-muted">演示数据：所有任务、Run 与路径均为虚构。点击行进入任务详情；审批入口仍以“待审批”为准，避免双份记录。</div>
-    <div v-else class="v-tiny v-muted">本机任务、Run 和路径来自 VocaMesh 本地运行时；Agent、团队和审批等其他页面仍使用演示数据。</div>
+    <div v-else class="v-tiny v-muted">本机 Task、Run 与路径来自 SQLite；团队编排和审批仍未接入真实任务执行。</div>
 
     <CreateTaskDialog v-model="dialogOpen" @submit="createFromDialog" @native-created="openTask($event.id)" />
   </div>

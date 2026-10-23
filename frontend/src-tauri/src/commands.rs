@@ -2,10 +2,13 @@ use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
-    ExecutionReadiness, ExecutionRequest, LocalTool, RecoveryInspection, RecoveryResolution,
-    RunEvent, RunRecord, ScanPhase, ServiceError, TaskRecord, ToolScanEvent, UnknownRunSummary,
+    AddTeamMemberInput, AgentPermissions, AgentRole, AppearanceSettings, CatalogStatus,
+    CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness, ExecutionRequest,
+    LocalTool, RecoveryInspection, RecoveryResolution, RunEvent, RunRecord, ScanPhase,
+    ServiceError, TaskRecord, TeamMemberRecord, TeamRecord, ToolScanEvent, UnknownRunSummary,
+    UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput, WorkspaceRecord,
 };
-use vocamesh_runtime::RuntimeNotification;
+use vocamesh_runtime::{ExecutionRuntime, RuntimeNotification};
 
 use crate::AppState;
 
@@ -34,6 +37,17 @@ where
     })
     .await
     .map_err(|_| ERR_RUNTIME)?
+}
+
+async fn with_catalog<T, F>(state: State<'_, AppState>, operation: F) -> Result<T, ServiceError>
+where
+    T: Send + 'static,
+    F: FnOnce(ExecutionRuntime) -> Result<T, ServiceError> + Send + 'static,
+{
+    let runtime = state.execution.clone().ok_or(ERR_STORAGE)?;
+    tauri::async_runtime::spawn_blocking(move || operation(runtime))
+        .await
+        .map_err(|_| ERR_RUNTIME)?
 }
 
 #[tauri::command]
@@ -146,6 +160,224 @@ pub(crate) async fn select_workspace_directory(
     .await
     .map_err(|_| ERR_RUNTIME)?;
     Ok(path.map(|path| path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub(crate) async fn get_catalog_status(
+    state: State<'_, AppState>,
+) -> Result<CatalogStatus, ServiceError> {
+    with_catalog(state, |runtime| runtime.catalog_status()).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_agents(
+    state: State<'_, AppState>,
+) -> Result<Vec<AgentRole>, ServiceError> {
+    with_catalog(state, |runtime| runtime.list_agents()).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_agent(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<AgentRole, ServiceError> {
+    with_catalog(state, move |runtime| runtime.get_agent(&id)).await
+}
+
+#[tauri::command]
+pub(crate) async fn create_agent(
+    state: State<'_, AppState>,
+    input: CreateAgentInput,
+) -> Result<AgentRole, ServiceError> {
+    with_catalog(state, move |runtime| runtime.create_agent(input)).await
+}
+
+#[tauri::command]
+pub(crate) async fn update_agent(
+    state: State<'_, AppState>,
+    id: String,
+    input: UpdateAgentInput,
+) -> Result<AgentRole, ServiceError> {
+    with_catalog(state, move |runtime| runtime.update_agent(&id, input)).await
+}
+
+#[tauri::command]
+pub(crate) async fn set_agent_permissions(
+    state: State<'_, AppState>,
+    id: String,
+    permissions: AgentPermissions,
+    expected_revision: Option<u64>,
+) -> Result<AgentRole, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.update_agent(
+            &id,
+            UpdateAgentInput {
+                permissions: Some(permissions),
+                expected_revision,
+                ..Default::default()
+            },
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn archive_agent(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), ServiceError> {
+    with_catalog(state, move |runtime| runtime.archive_agent(&id)).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_workspaces(
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkspaceRecord>, ServiceError> {
+    with_catalog(state, |runtime| runtime.list_workspaces()).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_workspace(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<WorkspaceRecord, ServiceError> {
+    with_catalog(state, move |runtime| runtime.get_workspace(&id)).await
+}
+
+#[tauri::command]
+pub(crate) async fn create_workspace(
+    state: State<'_, AppState>,
+    input: CreateWorkspaceInput,
+) -> Result<WorkspaceRecord, ServiceError> {
+    with_catalog(state, move |runtime| runtime.create_workspace(input)).await
+}
+
+#[tauri::command]
+pub(crate) async fn update_workspace_scopes(
+    state: State<'_, AppState>,
+    id: String,
+    input: UpdateWorkspaceScopesInput,
+) -> Result<WorkspaceRecord, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.update_workspace_scopes(&id, input)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn rename_workspace(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    expected_revision: Option<u64>,
+) -> Result<WorkspaceRecord, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.rename_workspace(&id, &name, expected_revision)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn archive_workspace(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), ServiceError> {
+    with_catalog(state, move |runtime| runtime.archive_workspace(&id)).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_teams(
+    state: State<'_, AppState>,
+) -> Result<Vec<TeamRecord>, ServiceError> {
+    with_catalog(state, |runtime| runtime.list_teams()).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_team(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<TeamRecord, ServiceError> {
+    with_catalog(state, move |runtime| runtime.get_team(&id)).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_team_members(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<TeamMemberRecord>, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.get_team(&id).map(|team| team.members)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn create_team(
+    state: State<'_, AppState>,
+    input: CreateTeamInput,
+) -> Result<TeamRecord, ServiceError> {
+    with_catalog(state, move |runtime| runtime.create_team(input)).await
+}
+
+#[tauri::command]
+pub(crate) async fn update_team(
+    state: State<'_, AppState>,
+    id: String,
+    input: UpdateTeamInput,
+) -> Result<TeamRecord, ServiceError> {
+    with_catalog(state, move |runtime| runtime.update_team(&id, input)).await
+}
+
+#[tauri::command]
+pub(crate) async fn add_team_member(
+    state: State<'_, AppState>,
+    id: String,
+    input: AddTeamMemberInput,
+) -> Result<TeamRecord, ServiceError> {
+    with_catalog(state, move |runtime| runtime.add_team_member(&id, input)).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_team_member(
+    state: State<'_, AppState>,
+    id: String,
+    agent_id: String,
+) -> Result<TeamRecord, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.remove_team_member(&id, &agent_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn set_team_reports_to(
+    state: State<'_, AppState>,
+    id: String,
+    agent_id: String,
+    reports_to_agent_id: String,
+) -> Result<TeamRecord, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.set_team_reports_to(&id, &agent_id, &reports_to_agent_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn get_appearance_settings(
+    state: State<'_, AppState>,
+) -> Result<AppearanceSettings, ServiceError> {
+    with_catalog(state, |runtime| runtime.appearance_settings()).await
+}
+
+#[tauri::command]
+pub(crate) async fn update_appearance_settings(
+    state: State<'_, AppState>,
+    settings: AppearanceSettings,
+) -> Result<AppearanceSettings, ServiceError> {
+    with_catalog(state, move |runtime| {
+        runtime.update_appearance_settings(settings)
+    })
+    .await
 }
 
 #[tauri::command]

@@ -39,4 +39,14 @@ Runtime 规范化并验证用户选择的目录，拒绝文件系统根、Home �
 
 ## Tauri 权限
 
+## v0.4 本地 Catalog 边界
+
+Agent 角色、Provider、指令、权限草稿，Workspace 路径与范围草稿，以及 Team 主管/成员关系只保存在本机 SQLite。schema v3 通过事务迁移保留现有 Task/Run/Event 与 Unknown Run 恢复信息；未来版本拒绝打开，迁移失败不会删库或留下半套表。
+
+Catalog 不读取凭据正文，也不会启动 CLI。Agent 的 write/shell/network 与 Workspace 范围从不作为当前 Runtime 授权来源；真实执行继续由独立 readiness 和 managed policy preflight 控制。执行状态仍为 execution.managed-policy-unverified 时，角色或团队 CRUD 不会开放任务启动。
+
+Rust 会规范化并检查目录存在、目录类型、符号链接、系统/过宽路径与相对范围；Team 的外键、主管、重复成员和无环不变量在事务内验证。归档仍被活跃 Team 引用的 Agent 或 Workspace 会失败，路径已失效的 Workspace 不能新建 Team 绑定或作为改绑目标。路径后来失效时，目录记录保留并显示需要检查。并发更新通过 revision 和 expectedRevision 防止旧状态覆盖。
+
+Catalog 审计只保存实体 ID、动作、版本与时间，不复制 Agent 指令、工作区完整路径或密钥。数据库/IPC 错误以固定错误码返回；原生端不回退 Mock。原生审批和通知列表保持空，不提供虚构授权入口；浏览器 Mock 中的审批只用于演示。
+
 主窗口 capability 只授予事件监听与取消监听，以及系统目录选择器 `dialog:allow-open`。Rust 只暴露固定的工具、目录选择和执行/历史命令；没有 Shell 插件、任意命令执行或任意文件 IPC。

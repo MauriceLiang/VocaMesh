@@ -7,9 +7,12 @@ import VocaButton from "@/components/ui/VocaButton.vue";
 import VocaStatus from "@/components/ui/VocaStatus.vue";
 import { useApprovalsStore } from "@/stores/approvals";
 import { approvalStateMeta } from "@/lib/status";
+import { useServices } from "@/services/adapters";
 
 const router = useRouter();
 const approvals = useApprovalsStore();
+const services = useServices();
+const isNative = services.mode === "tauri";
 
 const selected = computed(() => approvals.selected);
 
@@ -20,8 +23,8 @@ onMounted(async () => {
 
 <template>
   <div class="v-content">
-    <PageHeader title="待审批" subtitle="集中处理 Agent 等待你决定的请求。任务内的审批卡与本页指向同一条记录，不会产生两份。">
-      <template #actions><span class="v-tiny v-muted">默认不允许，需要你明确选择</span></template>
+    <PageHeader title="待审批" :subtitle="isNative ? '真实审批引擎尚未接入；当前不会生成或执行写入、命令等审批请求。' : '集中处理 Agent 等待你决定的请求。任务内的审批卡与本页指向同一条记录，不会产生两份。'">
+      <template #actions><span v-if="!isNative" class="v-tiny v-muted">默认不允许，需要你明确选择</span></template>
     </PageHeader>
 
     <div class="v-stack" :style="{ flex: '1 1 auto', minHeight: 0 }">
@@ -37,7 +40,7 @@ onMounted(async () => {
             {{ item.label }}
           </button>
         </div>
-        <button
+        <button v-if="!isNative"
           v-for="item in approvals.visible"
           :key="item.id"
           class="v-card flex flex-col gap-[6px] text-left"
@@ -53,7 +56,7 @@ onMounted(async () => {
         </button>
       </div>
 
-      <div v-if="selected" class="v-grow v-card v-detail-panel">
+      <div v-if="selected && !isNative" class="v-grow v-card v-detail-panel">
         <div class="flex items-start gap-2">
           <span class="flex min-w-0 flex-1 flex-col gap-[2px]">
             <b class="text-[16px]">{{ selected.title }}</b>
@@ -97,6 +100,11 @@ onMounted(async () => {
             </span>
           </div>
         </div>
+      </div>
+      <div v-else class="v-grow v-card v-empty">
+        <Shield :size="18" class="v-muted" />
+        <span class="text-[15px] font-semibold">{{ isNative ? "本机审批尚未接入" : "当前没有审批记录" }}</span>
+        <span class="v-small">{{ isNative ? "这里不会出现演示授权请求；运行时也不会根据此页面授予权限。" : "新的审批请求会显示在这里。" }}</span>
       </div>
     </div>
   </div>

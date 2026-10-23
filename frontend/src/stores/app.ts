@@ -2,6 +2,7 @@ import { computed, ref, watchEffect } from "vue";
 import { defineStore } from "pinia";
 import { usePreferredDark } from "@vueuse/core";
 import type { AppSettings, StatusTone } from "@/types";
+import { ServiceError } from "@/types";
 import { useServices } from "@/services/adapters";
 
 export interface ToastItem {
@@ -36,6 +37,7 @@ export const useAppStore = defineStore("app", () => {
   const toasts = ref<ToastItem[]>([]);
   const onboardingDone = ref(false);
   const booted = ref(false);
+  const settingsError = ref<string | null>(null);
   let toastId = 0;
 
   const resolvedTheme = computed<"light" | "dark">(() =>
@@ -45,16 +47,24 @@ export const useAppStore = defineStore("app", () => {
   const isMock = computed(() => services.mode === "mock");
 
   async function loadSettings(): Promise<void> {
-    settings.value = await services.settings.getSettings();
-    booted.value = true;
+    try {
+      settings.value = await services.settings.getSettings();
+      settingsError.value = null;
+      booted.value = true;
+    } catch (err) {
+      settingsError.value = err instanceof ServiceError ? err.message : "无法读取本机外观设置，请重试。";
+      throw err;
+    }
   }
 
   async function patchSettings(patch: Partial<AppSettings>): Promise<void> {
     settings.value = await services.settings.updateSettings(patch);
+    settingsError.value = null;
   }
 
   async function resetAppearance(): Promise<void> {
     settings.value = await services.settings.resetAppearance();
+    settingsError.value = null;
     toast("已恢复默认外观", "success");
   }
 
@@ -90,6 +100,7 @@ export const useAppStore = defineStore("app", () => {
     settings,
     toasts,
     booted,
+    settingsError,
     onboardingDone,
     resolvedTheme,
     isMock,

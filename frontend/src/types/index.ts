@@ -27,7 +27,7 @@ export type TaskState =
   | "failed"
   | "unknown";
 
-export type TaskFilterState = "all" | "draft" | "running" | "waiting-approval" | "queued" | "paused" | "needs-attention" | "done" | "failed";
+export type TaskFilterState = "all" | TaskState;
 export type TaskTimeFilter = "7d" | "30d" | "all";
 export type TaskMode = "single-agent" | "team" | "custom";
 
@@ -75,6 +75,9 @@ export interface Agent {
   /** 角色指令（高级配置）。 */
   instructions: string;
   permissions: AgentPermissions;
+  /** Native configured roles remain blocked while the runtime policy is unverified. */
+  runtimeReason?: string;
+  revision?: number;
 }
 
 export interface AgentPermissions {
@@ -100,6 +103,7 @@ export interface UpdateAgentInput {
   description?: string;
   instructions?: string;
   permissions?: Partial<AgentPermissions>;
+  expectedRevision?: number;
 }
 
 export interface LocalTool {
@@ -127,6 +131,7 @@ export interface TeamMember {
   /** 直属上级的 agentId 或 "user"（表示直接向用户汇报）。 */
   reportsTo: string;
   tool: string;
+  providerId?: string;
   state: AgentState;
 }
 
@@ -135,6 +140,9 @@ export interface Team {
   name: string;
   supervisorId: string;
   workspace: string;
+  /** Stable native catalog reference; browser Mock continues to use display names. */
+  workspaceId?: string;
+  revision?: number;
   members: TeamMember[];
 }
 
@@ -326,11 +334,16 @@ export interface Workspace {
   id: string;
   name: string;
   path: string;
+  /** False when the registered directory is missing, inaccessible, or no longer safe. */
+  pathAvailable?: boolean;
   taskCount: number;
   state: "ready" | "conflict" | "readonly";
   read: string[];
   write: string[];
   deny: string[];
+  revision?: number;
+  /** Registration is not an execution or filesystem permission grant. */
+  executionEnabled?: boolean;
   conflictInfo?: string;
 }
 

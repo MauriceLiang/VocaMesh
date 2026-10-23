@@ -31,7 +31,9 @@ const taskId = computed(() => String(route.params.id ?? ""));
 const task = computed(() => tasks.tasks.find((item) => item.id === taskId.value) ?? null);
 const isSingleAgent = computed(() => task.value?.mode === "single-agent");
 const meta = computed(() => (task.value ? taskStateMeta(task.value.state) : null));
-const pendingApproval = computed(() => approvals.pending.find((item) => item.taskId === taskId.value) ?? null);
+const pendingApproval = computed(() => task.value?.nativeExecution
+  ? null
+  : approvals.pending.find((item) => item.taskId === taskId.value) ?? null);
 
 const counts = computed(() => {
   const list = task.value?.subtasks ?? [];
@@ -124,7 +126,7 @@ function exportSummary(): void {
   const content = [
     `# ${current.name}`,
     `- 工作空间：${current.workspace}`,
-    `- 团队：${current.team}`,
+    `- ${current.nativeExecution ? "执行方式" : "团队"}：${current.team}`,
     `- Run：${current.runId}`,
     `- 状态：${current.stateNote}`,
     "",
@@ -137,7 +139,7 @@ function exportSummary(): void {
   anchor.download = `task-${current.id}-summary.md`;
   anchor.click();
   URL.revokeObjectURL(url);
-  app.toast("已导出执行摘要（演示内容）", "success");
+  app.toast(app.isMock ? "已导出执行摘要（演示内容）" : "已导出本机执行摘要", "success");
 }
 </script>
 
@@ -191,7 +193,7 @@ function exportSummary(): void {
     </div>
     <RuntimeRecoveryPanel v-if="task.nativeExecution && task.state === 'unknown'" :run-id="task.runId" />
 
-    <div class="v-card" :style="{ display: 'flex', alignItems: 'center', padding: '8px 4px', flex: '0 0 auto' }">
+    <div v-if="!task.nativeExecution" class="v-card" :style="{ display: 'flex', alignItems: 'center', padding: '8px 4px', flex: '0 0 auto' }">
       <div class="flex flex-1 items-baseline gap-[6px] px-[14px]"><b :style="{ color: 'var(--status-success)', fontSize: '15px' }">{{ counts.done }}</b><span class="v-small v-secondary">已完成</span></div>
       <div class="flex flex-1 items-baseline gap-[6px] px-[14px]"><b :style="{ fontSize: '15px' }">{{ counts.running }}</b><span class="v-small v-secondary">执行中</span></div>
       <div class="flex flex-1 items-baseline gap-[6px] px-[14px]"><b :style="{ color: 'var(--status-blocked)', fontSize: '15px' }">{{ counts.blocked }}</b><span class="v-small v-secondary">阻塞/待审批</span></div>
@@ -199,11 +201,11 @@ function exportSummary(): void {
       <div class="flex flex-1 items-baseline gap-[6px] px-[14px]"><b :style="{ fontSize: '15px' }">{{ counts.total }}</b><span class="v-small v-secondary">子任务总数</span></div>
     </div>
 
-    <div class="v-row-between">
+    <div v-if="!task.nativeExecution" class="v-row-between">
       <span class="v-section-title">执行流程</span>
       <span class="v-tiny v-muted">组织关系 ≠ 任务依赖：这里表达先后依赖</span>
     </div>
-    <TaskFlow :subtasks="task.subtasks" :highlight-id="highlight" @open="openSubtask" />
+    <TaskFlow v-if="!task.nativeExecution" :subtasks="task.subtasks" :highlight-id="highlight" @open="openSubtask" />
 
     <div class="v-row-between">
       <span class="v-section-title">{{ task.nativeExecution ? "只读任务" : task.mode === "custom" ? "执行计划" : isSingleAgent ? "Agent 对话" : "主管对话" }}</span>
@@ -211,6 +213,7 @@ function exportSummary(): void {
     </div>
     <div v-if="task.nativeExecution" class="v-card v-panel" :style="{ flex: '1 1 auto', minHeight: '200px' }">
       <span class="v-small font-medium">本机只读执行</span>
+      <span class="v-tiny v-muted">Run {{ task.runId }} · {{ task.stateNote }}</span>
       <span class="v-tiny v-muted">Provider：Claude Code · 权限：Read、Glob、Grep · Shell、写入、MCP 与子 Agent 不可用。</span>
       <div class="v-divider" />
       <span class="v-small whitespace-pre-wrap">{{ task.prompt }}</span>

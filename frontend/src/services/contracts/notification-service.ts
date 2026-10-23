@@ -4,8 +4,8 @@ import type { NotificationItem } from "@/types";
  * 通知服务。
  *
  * 用途：聚合任务事件与审批提醒。通知只是入口，审批操作仍在“待审批”。
- * 当前实现：MockNotificationService。
- * 未来实现：由 EventService 推送生成，Rust Core 负责持久化已读状态。
+ * 浏览器实现：MockNotificationService。
+ * Tauri：当前返回空列表；原生通知和已读状态尚未接入。
  */
 export interface NotificationService {
   /** 列出通知。调用时机：S15、顶栏未读角标。 */
