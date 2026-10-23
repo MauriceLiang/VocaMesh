@@ -14,16 +14,19 @@ import { useApprovalsStore } from "@/stores/approvals";
 import { useTasksStore } from "@/stores/tasks";
 import { useWorkspacesStore } from "@/stores/workspaces";
 import { taskStateMeta } from "@/lib/status";
+import { useServices } from "@/services/adapters";
 
 const router = useRouter();
 const app = useAppStore();
 const tasks = useTasksStore();
 const approvals = useApprovalsStore();
 const workspaces = useWorkspacesStore();
+const services = useServices();
+const isNative = services.mode === "tauri";
 
 const description = ref("");
 const mode = ref<"single-agent" | "team" | "custom">("team");
-const workspace = ref("research-2025");
+const workspace = ref(isNative ? "" : "research-2025");
 const dialogOpen = ref(false);
 
 const activeTasks = computed(() =>
@@ -31,6 +34,9 @@ const activeTasks = computed(() =>
 );
 const pendingApprovals = computed(() => approvals.pending.slice(0, 2));
 const doneTasks = computed(() => tasks.tasks.filter((task) => task.state === "done").slice(0, 3));
+const headerSubtitle = computed(() => isNative
+  ? "本机 Task/Run 与配置均来自本地服务；真实 Agent 执行仍受安全策略限制。"
+  : `下午好 · ${tasks.counters.running} 项任务正在执行，${pendingApprovals.value.length} 项等待你处理`);
 
 const metrics = computed(() => [
   { key: "running", label: "执行中", value: tasks.counters.running, icon: Loader, filter: "running", tone: "" },
@@ -40,6 +46,7 @@ const metrics = computed(() => [
 ]);
 
 const modeHint = computed(() => {
+  if (isNative) return "原生桌面当前只提供受安全策略限制的单 Agent 只读流程";
   if (mode.value === "single-agent") return "创建时选择一个可用 Agent，不启动主管";
   if (mode.value === "team") return "创建时选择一个主管可用的团队";
   return "计划编辑尚未实现；创建待配置占位任务";
@@ -49,6 +56,9 @@ const workspaceItems = computed(() => workspaces.workspaces.map((item) => ({ lab
 
 onMounted(async () => {
   await Promise.all([tasks.load(), approvals.load(), workspaces.load()]);
+  if (isNative && !workspaceItems.value.some((item) => item.value === workspace.value)) {
+    workspace.value = workspaceItems.value[0]?.value ?? "";
+  }
 });
 
 function submit(): void {
@@ -79,12 +89,14 @@ async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
 
 <template>
   <div class="v-content">
-    <PageHeader title="工作台" :subtitle="`下午好 · ${tasks.counters.running} 项任务正在执行，${pendingApprovals.length} 项等待你处理`">
+    <PageHeader title="工作台" :subtitle="headerSubtitle">
       <template #actions>
-        <VocaButton variant="ghost" @click="app.toast('模板库：演示环境仅提供预设示例', 'neutral')">模板库</VocaButton>
-        <VocaButton variant="primary" @click="dialogOpen = true">新建任务</VocaButton>
+        <VocaButton v-if="!isNative" variant="ghost" @click="app.toast('模板库：演示环境仅提供预设示例', 'neutral')">模板库</VocaButton>
+        <VocaButton v-else variant="ghost" disabled>模板库尚未接入</VocaButton>
+        <VocaButton variant="primary" @click="dialogOpen = true">{{ isNative ? "查看执行限制" : "新建任务" }}</VocaButton>
       </template>
     </PageHeader>
+    <div v-if="workspaces.lastError" class="v-banner is-failure"><span class="flex-1">{{ workspaces.lastError }}</span><VocaButton size="sm" @click="workspaces.load()">重试</VocaButton></div>
 
     <div class="v-card" :style="{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }">
       <textarea
@@ -94,14 +106,17 @@ async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
         placeholder="描述你要完成的工作，例如：把 2025 Q3 三家竞品的公开资料整理成一份对比报告…"
       />
       <div class="flex flex-wrap items-center gap-[10px]">
-        <VocaDropdown :items="workspaceItems" @select="(value) => (workspace = value)">
+        <VocaDropdown v-if="workspaceItems.length" :items="workspaceItems" @select="(value) => (workspace = value)">
           <button class="flex h-7 items-center gap-[6px] rounded-[6px] border px-[9px]" :style="{ borderColor: 'var(--border-default)', background: 'var(--bg-surface)' }">
             <Folder :size="13" class="v-secondary" />
-            <span class="v-mono v-tiny">{{ workspace }}</span>
+            <span class="v-mono v-tiny">{{ workspace || "选择工作空间" }}</span>
             <ChevronRight :size="12" class="v-muted rotate-90" />
           </button>
         </VocaDropdown>
-        <VocaSegmented
+        <button v-else-if="isNative && !workspaces.lastError" class="flex h-7 items-center gap-[6px] rounded-[6px] border px-[9px]" :style="{ borderColor: 'var(--border-default)', background: 'var(--bg-surface)' }" @click="router.push({ name: 'workspaces' })">
+          <Folder :size="13" class="v-secondary" /><span class="v-mono v-tiny">登记目录后可在此选择</span>
+        </button>
+        <VocaSegmented v-if="!isNative"
           v-model="mode"
           :items="[
             { value: 'single-agent', label: '快速执行' },
@@ -111,7 +126,7 @@ async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
         />
         <span class="v-spacer" />
         <span class="v-tiny v-muted">{{ modeHint }}</span>
-        <VocaButton variant="primary" @click="submit">创建任务</VocaButton>
+        <VocaButton variant="primary" @click="submit">{{ isNative ? "查看执行限制" : "创建任务" }}</VocaButton>
       </div>
     </div>
 
@@ -143,15 +158,15 @@ async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
               <span class="v-mono v-tiny v-muted">{{ task.workspace }}</span>
               <span class="v-tiny v-muted">· {{ task.team }}</span>
               <span class="v-tiny v-muted">· Run {{ task.runId }}</span>
-              <span class="v-tiny v-muted">· {{ task.subtasks.filter((s) => s.state === "success").length }}/{{ task.subtasks.length }} 子任务</span>
+              <span v-if="!task.nativeExecution" class="v-tiny v-muted">· {{ task.subtasks.filter((s) => s.state === "success").length }}/{{ task.subtasks.length }} 子任务</span>
             </span>
           </span>
           <VocaStatus :meta="taskStateMeta(task.state)" />
           <ChevronRight :size="13" class="v-muted" />
         </button>
         <div v-if="!activeTasks.length" class="v-card v-empty">
-          <span class="text-[15px] font-semibold">开始你的第一项任务</span>
-          <span class="v-small">在上方输入任务后点击“创建任务”。如果还没有可用的执行工具，先去“本地工具”完成安装与认证。</span>
+          <span class="text-[15px] font-semibold">{{ isNative ? "暂无本机任务" : "开始你的第一项任务" }}</span>
+          <span class="v-small">{{ isNative ? "当前安全策略阻止原生执行。Agent、团队与工作空间配置不会创建或启动任务。" : "在上方输入任务后点击“创建任务”。如果还没有可用的执行工具，先去“本地工具”完成安装与认证。" }}</span>
           <div class="flex items-center gap-2">
             <VocaButton size="sm" @click="router.push({ name: 'tools' })">去本地工具</VocaButton>
             <VocaButton size="sm" variant="ghost" @click="router.push({ name: 'agents' })">去创建 Agent 角色</VocaButton>
@@ -167,22 +182,24 @@ async function handleDialogSubmit(payload: CreateTaskInput): Promise<void> {
           </span>
           <VocaButton variant="ghost" size="sm" @click="router.push({ name: 'approvals' })">全部</VocaButton>
         </div>
-        <div v-for="approval in pendingApprovals" :key="approval.id" class="v-card v-panel" :style="{ gap: '7px' }">
-          <div class="v-row-between">
-            <VocaStatus :meta="{ label: '等待审批', tone: 'blocked', icon: 'alert' }" />
-            <span class="v-tiny v-muted">{{ approval.age }}</span>
+        <template v-if="!isNative">
+          <div v-for="approval in pendingApprovals" :key="approval.id" class="v-card v-panel" :style="{ gap: '7px' }">
+            <div class="v-row-between">
+              <VocaStatus :meta="{ label: '等待审批', tone: 'blocked', icon: 'alert' }" />
+              <span class="v-tiny v-muted">{{ approval.age }}</span>
+            </div>
+            <div class="v-mono" :style="{ fontSize: '11.5px' }">{{ approval.title }}</div>
+            <div class="v-tiny v-muted">{{ approval.agent }}</div>
+            <div class="v-tiny flex items-center gap-[5px]" :style="{ color: 'var(--status-blocked)' }">
+              <ShieldCheck :size="11" />{{ approval.risk[0] }}
+            </div>
+            <div class="flex items-center justify-end gap-[6px]">
+              <VocaButton size="sm" variant="ghost" @click="decide(approval.id, 'deny')">拒绝</VocaButton>
+              <VocaButton size="sm" @click="decide(approval.id, 'allow-once')">仅此一次允许</VocaButton>
+            </div>
           </div>
-          <div class="v-mono" :style="{ fontSize: '11.5px' }">{{ approval.title }}</div>
-          <div class="v-tiny v-muted">{{ approval.agent }}</div>
-          <div class="v-tiny flex items-center gap-[5px]" :style="{ color: 'var(--status-blocked)' }">
-            <ShieldCheck :size="11" />{{ approval.risk[0] }}
-          </div>
-          <div class="flex items-center justify-end gap-[6px]">
-            <VocaButton size="sm" variant="ghost" @click="decide(approval.id, 'deny')">拒绝</VocaButton>
-            <VocaButton size="sm" @click="decide(approval.id, 'allow-once')">仅此一次允许</VocaButton>
-          </div>
-        </div>
-        <div v-if="!pendingApprovals.length" class="v-card v-panel"><span class="v-small v-muted">没有待处理的审批。</span></div>
+        </template>
+        <div v-if="!pendingApprovals.length" class="v-card v-panel"><span class="v-small v-muted">{{ isNative ? "真实审批引擎尚未接入；当前不会生成或授权写入、命令等请求。" : "没有待处理的审批。" }}</span></div>
 
         <div class="v-row-between" :style="{ marginTop: '2px' }">
           <span class="v-section-title">最近完成</span>

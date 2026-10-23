@@ -4,11 +4,13 @@ import { useRoute, useRouter } from "vue-router";
 import { Bell, CircleHelp, Moon, Search, Sun } from "lucide-vue-next";
 import { useAppStore } from "@/stores/app";
 import { useNotificationsStore } from "@/stores/notifications";
+import { useServices } from "@/services/adapters";
 import VocaIconButton from "@/components/ui/VocaIconButton.vue";
 
 const props = defineProps<{ pageTitle: string; onOpenPalette: () => void }>();
 const app = useAppStore();
 const notifications = useNotificationsStore();
+const services = useServices();
 const route = useRoute();
 const router = useRouter();
 
@@ -44,6 +46,6 @@ async function toggleTheme(): Promise<void> {
     <VocaIconButton label="快捷键与帮助" @click="app.toast('快捷键：⌘K 命令面板 · Esc 关闭弹层 · Enter 发送消息', 'neutral')">
       <CircleHelp :size="15" />
     </VocaIconButton>
-    <span class="v-avatar" :title="`本地账户（演示） · ${String(route.name ?? '')}`">M</span>
+    <span class="v-avatar" :title="`${services.mode === 'mock' ? '本地账户（演示）' : '本地使用，无云端账户'} · ${String(route.name ?? '')}`">M</span>
   </header>
 </template>

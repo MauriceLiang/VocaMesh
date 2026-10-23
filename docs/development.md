@@ -24,6 +24,12 @@ pnpm --dir frontend tauri build
 
 Tauri 配置位于 `frontend/src-tauri/tauri.conf.json`。开始任务前需通过策略、CLI 版本和认证 readiness，并确认只读范围与数据发送。当前 Unix/macOS 因 managed hooks 无法可靠核验而 fail-closed；Windows 也显示不可执行。Unix 快照使用已验证的工作区目录描述符；符号链接、特殊文件或复制错误会阻止启动。
 
+## v0.4 本机配置
+
+Tauri 的 Agent、Workspace、Team 和外观偏好使用 ExecutionRuntime 的同一 SQLite 文件（schema v3）；桌面目录初始为空，不自动创建 seed。浏览器预览仍用完整 Mock。原生 Approval/Notification 暂无数据源，保持空状态。Catalog 可在 execution readiness 被阻断时使用，但不授予 Runtime 权限，也不启动 CLI。
+
+Workspace 必须登记存在且通过 Rust 路径检查的目录。Team 关系使用稳定 ID；Rust 事务内校验唯一名称、Provider、引用关系、主管和环。权限和路径范围是配置草稿。需要验证 Catalog 逻辑时运行 Rust 与前端单测；不要通过真实模型任务验收，也不要读取凭据正文。
+
 ## 本地质量门禁
 
 在仓库根目录运行：
@@ -53,11 +59,13 @@ PowerShell：
 
 ## 真实 CLI 与平台验收
 
-自动化用例覆盖纯解析、目录描述符快照、实际复制上限、SQLite v1→v2 migration/历史保留/回滚/future schema 拒绝、Unknown Run 检查/恢复、进程组状态与清理失败、Unix fake CLI 成功/失败/停止/超时/孤儿进程组/诊断脱敏，以及前端 readiness 与恢复面板 IPC/确认流程。Fake CLI 不访问真实账号或模型。定向运行：
+自动化用例覆盖纯解析、目录描述符快照、实际复制上限、SQLite v1→v2→v3 migration/Task/Run/Event 恢复历史保留/回滚/future schema 拒绝、Catalog 名称/路径/范围/revision/外键/Team 无环、Unknown Run 检查/恢复、进程组状态与清理失败、Unix fake CLI 成功/失败/停止/超时/孤儿进程组/诊断脱敏，以及前端原生服务、Pinia 错误态、桌面空态和 readiness 与恢复面板流程。Fake CLI 不访问真实账号或模型。定向运行：
 
 ```bash
 cargo test -p vocamesh-runtime --offline
-pnpm --dir frontend test -- --run
+pnpm --dir frontend typecheck
+pnpm --dir frontend test
+pnpm --dir frontend build
 ```
 
 真实模型请求只有在 M1–M3 策略门禁通过且开发者另行明确授权后才能手工运行；当前 managed hooks 风险未能可靠排除，真实任务验收应标记 BLOCKED。GUI/目录选择、桌面停止和重启恢复须在有完整 Xcode 和可验收桌面会话的机器上单独验收：使用受控 fixture 创建 Unknown Run，分别检查仍运行、退出候选、无法核实和缺少 PGID；验证确认前不归档、确认后 Run 记为失败、快照清理和再次启动门禁行为。不得把 fake CLI 单测或 CLI 进程创建当作 GUI/真实执行验收。Windows 当前明确禁用真实执行；未实际验证的平台必须在 `implementation-report.md` 中单独列出。

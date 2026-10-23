@@ -13,9 +13,13 @@ import { useAgentsStore } from "@/stores/agents";
 import { useToolsStore } from "@/stores/tools";
 import { agentStateMeta } from "@/lib/status";
 import type { AgentPermissions } from "@/types";
+import { useServices } from "@/services/adapters";
+import { toolStateMeta } from "@/lib/status";
 
 const agents = useAgentsStore();
 const tools = useToolsStore();
+const services = useServices();
+const isNative = services.mode === "tauri";
 
 const advancedOpen = ref(false);
 const execOpen = ref(false);
@@ -25,36 +29,52 @@ const createName = ref("");
 const createRole = ref("");
 const createToolId = ref("claude");
 const draftName = ref("");
+const draftRole = ref("");
 const draftDescription = ref("");
+const draftInstructions = ref("");
 
 const selected = computed(() => agents.selected);
-const toolItems = computed(() => tools.tools.map((tool) => ({ value: tool.id, label: `${tool.name}（${tool.state === "ready" ? "可用" : "需登录/未就绪"}）` })));
+const supportedProviders = [
+  { id: "claude", name: "Claude Code" },
+  { id: "codex", name: "Codex CLI" },
+  { id: "opencode", name: "OpenCode" },
+] as const;
+const toolItems = computed(() => isNative
+  ? supportedProviders.map((provider) => {
+      const tool = tools.tools.find((item) => item.id === provider.id);
+      return { value: provider.id, label: `${provider.name}（${tool ? toolStateMeta(tool.state).label : "未检测到本机 CLI"}）` };
+    })
+  : tools.tools.map((tool) => ({ value: tool.id, label: `${tool.name}（${tool.state === "ready" ? "可用" : "需登录/未就绪"}）` })));
 
 const permissionRows: Array<{ key: keyof AgentPermissions; name: string; description: string }> = [
-  { key: "read", name: "读取工作空间文件", description: "只能读取 research-2025 及子目录" },
-  { key: "write", name: "写入与修改文件", description: "写入前对高风险文件请求授权" },
-  { key: "shell", name: "执行 shell 命令", description: "白名单命令可直接执行" },
-  { key: "network", name: "访问网络", description: "仅研究类角色可开启，限 20 次/任务" },
+  { key: "read", name: "读取工作空间文件", description: "本地保存的范围配置草稿" },
+  { key: "write", name: "写入与修改文件", description: "当前 Runtime 未开放写入" },
+  { key: "shell", name: "执行 shell 命令", description: "当前 Runtime 未开放 Shell" },
+  { key: "network", name: "访问网络", description: "当前 Runtime 未开放网络访问" },
 ];
 
 onMounted(async () => {
   await Promise.all([agents.load(), tools.load()]);
   if (agents.selected) {
     draftName.value = agents.selected.name;
+    draftRole.value = agents.selected.role;
     draftDescription.value = agents.selected.description;
+    draftInstructions.value = agents.selected.instructions;
   }
 });
 
 function syncDraft(): void {
   if (agents.selected) {
     draftName.value = agents.selected.name;
+    draftRole.value = agents.selected.role;
     draftDescription.value = agents.selected.description;
+    draftInstructions.value = agents.selected.instructions;
   }
 }
 
 async function save(): Promise<void> {
   if (!agents.selectedId) return;
-  await agents.update(agents.selectedId, { name: draftName.value, description: draftDescription.value });
+  await agents.update(agents.selectedId, { name: draftName.value, role: draftRole.value, description: draftDescription.value, instructions: draftInstructions.value });
 }
 
 async function changeTool(toolId: string): Promise<void> {
@@ -92,6 +112,9 @@ async function confirmDelete(): Promise<void> {
       </template>
     </PageHeader>
 
+    <div v-if="isNative" class="v-banner is-neutral">这里管理本机 Agent 角色配置。角色已保存不代表可执行；当前 managed policy 尚未核验，执行保持阻断。</div>
+    <div v-if="agents.lastError" class="v-banner is-failure"><span class="flex-1">{{ agents.lastError }}</span><VocaButton size="sm" @click="agents.load()">重试</VocaButton></div>
+
     <div class="v-stack" :style="{ flex: '1 1 auto', minHeight: 0 }">
       <div class="v-col-list v-col" :style="{ gap: '8px', overflow: 'auto' }">
         <button
@@ -127,6 +150,10 @@ async function confirmDelete(): Promise<void> {
             <VocaInput v-model="draftName" aria-label="名称" />
           </div>
           <div class="v-field">
+            <span class="lbl">职责</span>
+            <VocaInput v-model="draftRole" aria-label="职责" />
+          </div>
+          <div class="v-field">
             <span class="lbl">执行工具</span>
             <VocaSelect :model-value="selected.toolId" :items="toolItems" aria-label="执行工具" @update:model-value="changeTool" />
           </div>
@@ -143,7 +170,7 @@ async function confirmDelete(): Promise<void> {
             <span class="lbl">角色指令（高级）</span>
             <span class="v-tiny v-muted">{{ advancedOpen ? "已展开" : "默认收起" }}</span>
           </button>
-          <VocaTextarea v-if="advancedOpen" :model-value="selected.instructions" :rows="4" aria-label="角色指令" />
+            <VocaTextarea v-if="advancedOpen" v-model="draftInstructions" :rows="4" aria-label="角色指令" />
         </div>
 
         <div class="v-field">
@@ -157,47 +184,55 @@ async function confirmDelete(): Promise<void> {
               <VocaSwitch
                 :model-value="selected.permissions[row.key]"
                 :label="row.name"
+                :disabled="isNative && row.key !== 'read'"
                 @update:model-value="agents.togglePermission(selected.id, row.key, $event)"
               />
             </div>
           </div>
         </div>
 
-        <button class="flex items-center gap-2 rounded-[6px] border px-[10px] py-[9px] text-left" :style="{ borderColor: 'var(--border-default)' }" @click="execOpen = !execOpen">
+        <button v-if="!isNative" class="flex items-center gap-2 rounded-[6px] border px-[10px] py-[9px] text-left" :style="{ borderColor: 'var(--border-default)' }" @click="execOpen = !execOpen">
           <component :is="execOpen ? ChevronDown : ChevronRight" :size="13" class="v-muted" />
           <span class="v-small v-secondary flex-1">执行参数：并发、超时、重试策略</span>
           <span class="v-tiny v-muted">{{ execOpen ? "已展开" : "默认收起" }}</span>
         </button>
-        <div v-if="execOpen" class="grid grid-cols-3 gap-[10px]">
+        <div v-if="execOpen && !isNative" class="grid grid-cols-3 gap-[10px]">
           <div class="v-field"><span class="lbl">并发</span><div class="v-select" :style="{ cursor: 'default' }"><span class="v-mono">2</span><span class="v-tiny v-muted">任务</span></div></div>
           <div class="v-field"><span class="lbl">单步超时</span><div class="v-select" :style="{ cursor: 'default' }"><span class="v-mono">15</span><span class="v-tiny v-muted">分钟</span></div></div>
           <div class="v-field"><span class="lbl">自动重试</span><div class="v-select" :style="{ cursor: 'default' }"><span>关闭</span><span class="v-tiny v-muted">需人工确认</span></div></div>
         </div>
 
         <div class="v-banner is-neutral" :style="{ alignItems: 'flex-start' }">
-          保存只代表配置已保存；正在运行的 Run 不会静默采用新配置，改动从下一个新任务/新 Run 开始生效。
+          {{ isNative ? "所有 Agent 权限均为配置草稿，不授予读取、写入、Shell 或网络能力；真实执行目前不可用。" : "保存只代表配置已保存；正在运行的 Run 不会静默采用新配置，改动从下一个新任务/新 Run 开始生效。" }}
         </div>
+      </div>
+      <div v-else class="v-grow v-card v-empty">
+        <Boxes :size="18" class="v-muted" />
+        <span class="text-[15px] font-semibold">{{ agents.lastError ? "无法读取本机 Agent 配置" : "尚无 Agent 角色" }}</span>
+        <span class="v-small">{{ agents.lastError ?? "创建的角色会保存在本机；保存配置不会启动 Agent 进程。" }}</span>
+        <VocaButton v-if="agents.lastError" size="sm" @click="agents.load()">重试</VocaButton>
+        <VocaButton v-else size="sm" variant="primary" @click="createOpen = true">添加第一个 Agent 角色</VocaButton>
       </div>
     </div>
 
-    <VocaDialog v-model="createOpen" title="新建 Agent 角色" subtitle="最少三项即可保存；高级配置可在创建后编辑。" :width="560">
+    <VocaDialog v-model="createOpen" title="新建 Agent 角色" :subtitle="isNative ? '保存本机角色配置；不会启动 CLI 或模型任务。' : '最少三项即可保存；高级配置可在创建后编辑。'" :width="560">
       <div class="v-field"><span class="lbl">名称</span><VocaInput v-model="createName" aria-label="角色名称" placeholder="例如：事实核查员" /></div>
       <div class="v-field"><span class="lbl">职责描述</span><VocaInput v-model="createRole" aria-label="职责描述" placeholder="例如：核对来源与数字" /></div>
       <div class="v-field"><span class="lbl">执行工具</span><VocaSelect v-model="createToolId" :items="toolItems" aria-label="执行工具" /></div>
-      <div class="v-banner is-neutral" :style="{ alignItems: 'flex-start' }">保存只代表配置已保存；角色需要使用“已安装且可用”的工具才能真正执行任务。</div>
+      <div class="v-banner is-neutral" :style="{ alignItems: 'flex-start' }">{{ isNative ? "角色已保存后仍不可执行；managed policy 未核验前运行时保持阻断。" : "保存只代表配置已保存；角色需要使用“已安装且可用”的工具才能真正执行任务。" }}</div>
       <template #footer>
         <VocaButton variant="ghost" @click="createOpen = false">取消</VocaButton>
         <VocaButton variant="primary" @click="createAgent">保存角色</VocaButton>
       </template>
     </VocaDialog>
 
-    <VocaDialog v-model="deleteOpen" title="删除 Agent 角色" subtitle="删除后该角色不能再被分配；历史 Run 记录保留。" :width="520">
+    <VocaDialog v-model="deleteOpen" title="归档 Agent 角色" subtitle="归档后该角色不能再被分配；历史 Run 记录保留。" :width="520">
       <div class="v-banner is-failure" :style="{ alignItems: 'flex-start' }">
-        将删除角色 <b>{{ selected?.name }}</b>。该角色不能再被分配；历史 Run、审批记录与日志保留。
+        将归档角色 <b>{{ selected?.name }}</b>。如果团队仍引用此角色，后端会阻止归档。
       </div>
       <template #footer>
         <VocaButton variant="ghost" @click="deleteOpen = false">取消</VocaButton>
-        <VocaButton variant="danger" @click="confirmDelete">删除角色</VocaButton>
+        <VocaButton variant="danger" @click="confirmDelete">归档角色</VocaButton>
       </template>
     </VocaDialog>
   </div>

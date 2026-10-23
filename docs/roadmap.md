@@ -31,3 +31,11 @@
 
 - 先补齐受控执行生命周期与平台验收，再考虑可审核写权限、文件变更审批和 Codex/OpenCode Adapter。
 - 多 Agent 编排依赖经过验证的单 Agent 生命周期、停止、日志、持久化与安全边界。
+
+## v0.4 本地 Catalog 与原生桌面去 Mock
+
+基于 `origin/main` 基线 `30707916b0d407d910a3550ac1e849018b6e9881` 的 `feature/v0.4-native-catalog` 实施。SQLite schema v3 在原数据库内增加 Agent 角色、权限配置草稿、Workspace、Team/成员关系、审计和外观偏好；v1 连续迁移到 v3，v2→v3 事务失败会回滚，v1/v2 的 Task、Run、Event 和恢复字段保留。原生 Tauri Services 显式接入 Catalog，失败显示错误并可重试，不回落到 Mock；浏览器 Mock 仍保留。
+
+桌面页面现在以真实 Catalog 显示 Agent、Workspace、Team 与关系，审批/通知保持空状态，设置仅持久化支持的外观字段。Agent/Workspace 权限只保存为未激活配置，`ManagedPolicyStatus::Unverified` 与 `execution.managed-policy-unverified` 执行门禁未放宽；本阶段没有启动 CLI 或真实模型任务，也未恢复 GitHub Actions。
+
+本轮 `./scripts/verify-local.sh` 退出码 0：Rust workspace 73 项测试（Agent 25、Core 2、Runtime 46），前端 11 个文件/41 项测试，以及 fmt、Clippy、Cargo check、typecheck、Vite build、diff 检查均 PASS。Tauri 编译包含在 workspace check 中。macOS 原生 GUI 因缺少完整 Xcode / 可验收窗口标记 BLOCKED；Windows、Linux、Playwright E2E 未验收。详细限制及逐项 GUI 清单见 `implementation-report.md` 与 `v0.4-gui-acceptance.md`。本地构建和自动化不能替代重启后的原生桌面验收，也不代表多 Agent 执行已实现。

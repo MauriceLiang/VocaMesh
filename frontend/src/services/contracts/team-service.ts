@@ -4,8 +4,7 @@ import type { Team, TeamMember } from "@/types";
  * Agent 团队与组织关系服务。
  *
  * 用途：维护“谁向谁汇报”的组织关系（与任务依赖无关）。
- * 当前实现：MockTeamService。
- * 未来实现：Rust Core 的团队配置持久化。
+ * Browser Mock 使用内存数据；Tauri 通过 Rust Catalog 持久化团队与组织关系，不启动团队任务。
  */
 export interface TeamService {
   /** 列出全部团队。调用时机：S09 左树、创建任务选择团队。 */
@@ -21,10 +20,13 @@ export interface TeamService {
    * 说明：必须指定主管；主管默认向用户汇报。
    * 错误：重名 `team.duplicate`。
    */
-  createTeam(input: { name: string; supervisorId: string; workspace: string }): Promise<Team>;
+  createTeam(input: { name: string; supervisorId: string; workspace: string; workspaceId?: string }): Promise<Team>;
 
   /** 更新团队基础信息（名称、主管、默认工作空间）。错误：`team.not-found`、`team.cycle`。 */
-  updateTeam(id: string, input: Partial<Pick<Team, "name" | "supervisorId" | "workspace">>): Promise<Team>;
+  updateTeam(
+    id: string,
+    input: Partial<Pick<Team, "name" | "supervisorId" | "workspace" | "workspaceId">> & { expectedRevision?: number },
+  ): Promise<Team>;
 
   /**
    * 添加成员。
@@ -45,7 +47,7 @@ export interface TeamService {
    * 限制：禁止自我管理；禁止间接环（A→B→A）。`reportsTo: "user"` 表示成为团队主管。
    * 错误：`team.self-management`、`team.cycle`。
    * Mock：返回 `ServiceError("team.cycle", path)`，`detail` 携带环路径用于提示。
-   * Rust：校验并写入，需在事务内完成以免并发写出环。
+   * Tauri：Rust 在事务内校验并写入，以免并发关系变更形成环。
    */
   setReportsTo(teamId: string, agentId: string, reportsTo: string): Promise<Team>;
 

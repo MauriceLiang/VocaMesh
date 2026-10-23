@@ -88,7 +88,6 @@ export function createTauriExecutionService(): ExecutionService {
 
 function mapTask(record: NativeTaskRecord): Task {
   const state = mapTaskState(record.state);
-  const subtaskState = state === "running" ? "running" : state === "done" ? "success" : state === "failed" ? "failure" : state === "stopped" ? "cancelled" : state === "unknown" ? "unknown" : "pending";
   const stateNote = ({
     queued: "等待本机 Claude Code 执行",
     starting: "正在启动本机 Claude Code",
@@ -111,7 +110,7 @@ function mapTask(record: NativeTaskRecord): Task {
     startedAt: ["queued", "starting"].includes(state) ? "未开始" : new Date(record.updatedAt).toISOString(),
     state,
     stateNote,
-    subtasks: [{ id: record.currentRunId, name: "Claude Code 只读分析", assignee: "Claude Code", state: subtaskState, result: stateNote }],
+    subtasks: [],
     messages: [],
     nativeExecution: true,
     prompt: record.prompt,
@@ -206,7 +205,7 @@ export function createTauriRunService(execution: ExecutionService): RunService {
 
 function csv(value: string | number): string { return `"${String(value).replaceAll('"', '""')}"`; }
 
-export function createTauriRuntimeEvents(execution: ExecutionService, mock: EventService, subscribeToolScan: EventService["subscribeToolScan"]): EventService {
+export function createTauriRuntimeEvents(execution: ExecutionService, subscribeToolScan: EventService["subscribeToolScan"]): EventService {
   return {
     subscribeTaskLogs(runId, handler) {
       const deliver = (event: NativeRunEvent) => {
@@ -219,7 +218,7 @@ export function createTauriRuntimeEvents(execution: ExecutionService, mock: Even
         void execution.getTask(run.taskId).then((task) => handler(mapTask(task)));
       });
     },
-    subscribeApprovals: mock.subscribeApprovals,
+    subscribeApprovals() { return () => undefined; },
     subscribeToolScan,
   };
 }

@@ -4,8 +4,8 @@ import type { AppSettings } from "@/types";
  * 应用设置服务。
  *
  * 用途：外观、密度、窗口行为、并发、日志保留、通知偏好。
- * 当前实现：MockSettingsService（内存 + localStorage 可选）。
- * 未来实现：Rust Core 的设置持久化；窗口行为需与桌面进程能力对齐。
+ * 浏览器实现：MockSettingsService（内存 + localStorage 可选）。
+ * Tauri：外观设置由 Rust Catalog 持久化；尚未实现的桌面能力以稳定错误返回。
  */
 export interface SettingsService {
   /** 读取设置。调用时机：应用启动、进入 S13。 */
@@ -17,6 +17,6 @@ export interface SettingsService {
   /** 重置为默认（仅外观相关）。 */
   resetAppearance(): Promise<AppSettings>;
 
-  /** 重置全部演示数据（Mock 专用；正式实现应改为“清除本地缓存”并二次确认）。 */
+  /** 重置演示数据（仅 Browser Mock 支持；Tauri 返回未实现错误）。 */
   resetDemoData(): Promise<void>;
 }

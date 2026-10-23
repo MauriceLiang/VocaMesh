@@ -11,8 +11,52 @@ const ERR_SCHEMA: ServiceError = ServiceError::new(
 );
 const EVENT_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
+const CATALOG_SCHEMA: &str = "
+CREATE TABLE agent_roles (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, name_normalized TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL, provider_id TEXT NOT NULL CHECK (provider_id IN ('claude','codex','opencode')),
+    description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '',
+    archived_at INTEGER, revision INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE agent_permission_configs (
+    agent_id TEXT PRIMARY KEY REFERENCES agent_roles(id),
+    request_read INTEGER NOT NULL CHECK (request_read IN (0,1)),
+    request_write INTEGER NOT NULL CHECK (request_write IN (0,1)),
+    request_shell INTEGER NOT NULL CHECK (request_shell IN (0,1)),
+    request_network INTEGER NOT NULL CHECK (request_network IN (0,1)),
+    revision INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL
+);
+CREATE TABLE workspaces (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, name_normalized TEXT NOT NULL UNIQUE,
+    canonical_path TEXT NOT NULL UNIQUE, archived_at INTEGER,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE workspace_scopes (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('read','write','deny')),
+    relative_path TEXT NOT NULL, PRIMARY KEY (workspace_id, scope_kind, relative_path)
+);
+CREATE TABLE teams (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, name_normalized TEXT NOT NULL UNIQUE,
+    supervisor_agent_id TEXT NOT NULL REFERENCES agent_roles(id),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id), archived_at INTEGER,
+    revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE team_members (
+    team_id TEXT NOT NULL REFERENCES teams(id), agent_id TEXT NOT NULL REFERENCES agent_roles(id),
+    reports_to_agent_id TEXT REFERENCES agent_roles(id), PRIMARY KEY (team_id, agent_id)
+);
+CREATE INDEX idx_team_members_agent ON team_members(agent_id);
+CREATE INDEX idx_teams_workspace ON teams(workspace_id);
+CREATE TABLE catalog_audit (
+    id TEXT PRIMARY KEY, object_type TEXT NOT NULL, object_id TEXT NOT NULL,
+    action TEXT NOT NULL, revision INTEGER, happened_at INTEGER NOT NULL
+);
+CREATE TABLE catalog_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+";
 
-pub(crate) struct Store(Connection);
+pub(crate) struct Store(pub(crate) Connection);
 
 pub(crate) struct RunFinish<'a> {
     pub(crate) run_state: RunState,
@@ -24,6 +68,11 @@ pub(crate) struct RunFinish<'a> {
     pub(crate) pid: Option<u32>,
 }
 
+fn migrate_catalog_schema(connection: &Connection) -> Result<(), ServiceError> {
+    let migration = format!("BEGIN IMMEDIATE; {CATALOG_SCHEMA} PRAGMA user_version = 3; COMMIT;");
+    connection.execute_batch(&migration).map_err(|_| ERR_WRITE)
+}
+
 impl Store {
     pub(crate) fn open(path: &std::path::Path) -> Result<Self, ServiceError> {
         let connection = Connection::open(path).map_err(|_| ERR_READ)?;
@@ -33,11 +82,11 @@ impl Store {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ERR_READ)?;
-        if version > 2 {
+        if version > 3 {
             return Err(ERR_SCHEMA);
         }
         if version == 0 {
-            connection.execute_batch(
+            let schema = format!(
                 "BEGIN IMMEDIATE;
                  CREATE TABLE tasks (
                     id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT NOT NULL,
@@ -67,9 +116,11 @@ impl Store {
                     kind TEXT NOT NULL, text TEXT NOT NULL,
                     PRIMARY KEY(run_id, sequence)
                  );
-                 PRAGMA user_version = 2;
+                 {CATALOG_SCHEMA}
+                 PRAGMA user_version = 3;
                  COMMIT;"
-            ).map_err(|_| ERR_WRITE)?;
+            );
+            connection.execute_batch(&schema).map_err(|_| ERR_WRITE)?;
         } else if version == 1 {
             connection
                 .execute_batch(
@@ -82,6 +133,9 @@ impl Store {
                  COMMIT;",
                 )
                 .map_err(|_| ERR_WRITE)?;
+            migrate_catalog_schema(&connection)?;
+        } else if version == 2 {
+            migrate_catalog_schema(&connection)?;
         }
         Ok(Self(connection))
     }
@@ -672,14 +726,14 @@ fn insert_audit_event(
     Ok(())
 }
 
-fn new_id(tx: &Transaction<'_>, prefix: &str) -> Result<String, ServiceError> {
+pub(crate) fn new_id(tx: &Transaction<'_>, prefix: &str) -> Result<String, ServiceError> {
     let random: String = tx
         .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
         .map_err(|_| ERR_WRITE)?;
     Ok(format!("{prefix}_{random}"))
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -707,7 +761,15 @@ mod tests {
         Connection::open(path)
             .unwrap()
             .execute_batch(
-                "ALTER TABLE runs DROP COLUMN process_group_id;
+                "DROP TABLE team_members;
+                 DROP TABLE teams;
+                 DROP TABLE workspace_scopes;
+                 DROP TABLE workspaces;
+                 DROP TABLE agent_permission_configs;
+                 DROP TABLE agent_roles;
+                 DROP TABLE catalog_audit;
+                 DROP TABLE catalog_settings;
+                 ALTER TABLE runs DROP COLUMN process_group_id;
                  ALTER TABLE runs DROP COLUMN recovery_status;
                  ALTER TABLE runs DROP COLUMN recovery_checked_at;
                  PRAGMA user_version = 1;",
@@ -716,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_database_initializes_schema_v2() {
+    fn empty_database_initializes_schema_v3_without_catalog_seeds() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("runs.sqlite3");
         let _store = Store::open(&path).unwrap();
@@ -724,7 +786,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let columns = connection
             .prepare("PRAGMA table_info(runs)")
             .unwrap()
@@ -735,6 +797,19 @@ mod tests {
         assert!(columns.contains(&"process_group_id".into()));
         assert!(columns.contains(&"recovery_status".into()));
         assert!(columns.contains(&"recovery_checked_at".into()));
+        let catalog_agents: i64 = connection
+            .query_row("SELECT count(*) FROM agent_roles", [], |row| row.get(0))
+            .unwrap();
+        let catalog_workspaces: i64 = connection
+            .query_row("SELECT count(*) FROM workspaces", [], |row| row.get(0))
+            .unwrap();
+        let catalog_teams: i64 = connection
+            .query_row("SELECT count(*) FROM teams", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            (catalog_agents, catalog_workspaces, catalog_teams),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -788,7 +863,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(migrated_task, task);
         assert_eq!(migrated_run, run);
         assert_eq!(migrated_events, vec![event]);
@@ -833,6 +908,192 @@ mod tests {
     }
 
     #[test]
+    fn v2_migration_preserves_unknown_run_recovery_fields_and_events() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("runs.sqlite3");
+        let (history, process_group_id) = {
+            let mut store = Store::open(&path).unwrap();
+            let mut history = Vec::new();
+
+            let (success_task, success_run) = store
+                .create_pending(
+                    &request("00000000-0000-4000-8000-000000000032"),
+                    "/tmp/catalog-migration",
+                )
+                .unwrap();
+            store
+                .set_state(&success_run.id, RunState::Starting, "starting", None, None)
+                .unwrap();
+            store
+                .set_state(
+                    &success_run.id,
+                    RunState::Running,
+                    "running",
+                    Some(81),
+                    Some(81),
+                )
+                .unwrap();
+            store
+                .append_event(&success_run.id, "text", "preserve success")
+                .unwrap();
+            let success_run = store
+                .finish(
+                    &success_run.id,
+                    RunFinish {
+                        run_state: RunState::Finished,
+                        outcome: "success",
+                        task_state: "done",
+                        exit_code: Some(0),
+                        summary: Some("successful run"),
+                        error_code: None,
+                        pid: None,
+                    },
+                )
+                .unwrap();
+            history.push((
+                store.get_task(&success_task.id).unwrap(),
+                success_run.clone(),
+                store.list_events(&success_run.id, 0, 10).unwrap(),
+            ));
+
+            let (failed_task, failed_run) = store
+                .create_pending(
+                    &request("00000000-0000-4000-8000-000000000033"),
+                    "/tmp/catalog-migration",
+                )
+                .unwrap();
+            store
+                .set_state(&failed_run.id, RunState::Starting, "starting", None, None)
+                .unwrap();
+            store
+                .set_state(
+                    &failed_run.id,
+                    RunState::Running,
+                    "running",
+                    Some(82),
+                    Some(82),
+                )
+                .unwrap();
+            store
+                .append_event(&failed_run.id, "text", "preserve failure")
+                .unwrap();
+            let failed_run = store
+                .finish(
+                    &failed_run.id,
+                    RunFinish {
+                        run_state: RunState::Crashed,
+                        outcome: "failed",
+                        task_state: "failed",
+                        exit_code: Some(7),
+                        summary: Some("failed run"),
+                        error_code: Some("execution.cli-not-ready"),
+                        pid: None,
+                    },
+                )
+                .unwrap();
+            history.push((
+                store.get_task(&failed_task.id).unwrap(),
+                failed_run.clone(),
+                store.list_events(&failed_run.id, 0, 10).unwrap(),
+            ));
+
+            let (created_task, created_run) = store
+                .create_pending(
+                    &request("00000000-0000-4000-8000-000000000031"),
+                    "/tmp/catalog-migration",
+                )
+                .unwrap();
+            store
+                .set_state(&created_run.id, RunState::Starting, "starting", None, None)
+                .unwrap();
+            store
+                .set_state(
+                    &created_run.id,
+                    RunState::Running,
+                    "running",
+                    Some(83),
+                    Some(83),
+                )
+                .unwrap();
+            store
+                .append_event(&created_run.id, "text", "preserve before v3")
+                .unwrap();
+            let unknown = store
+                .finish(
+                    &created_run.id,
+                    RunFinish {
+                        run_state: RunState::Unknown,
+                        outcome: "unknown",
+                        task_state: "unknown",
+                        exit_code: None,
+                        summary: Some("uncertain process"),
+                        error_code: Some("run.stop-unconfirmed"),
+                        pid: Some(83),
+                    },
+                )
+                .unwrap();
+            history.push((
+                store.get_task(&created_task.id).unwrap(),
+                unknown,
+                store.list_events(&created_run.id, 0, 10).unwrap(),
+            ));
+            let process_group_id = store.process_group_id(&created_run.id).unwrap();
+            (history, process_group_id)
+        };
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("DROP TABLE team_members; DROP TABLE teams; DROP TABLE workspace_scopes; DROP TABLE workspaces; DROP TABLE agent_permission_configs; DROP TABLE agent_roles; DROP TABLE catalog_audit; DROP TABLE catalog_settings; PRAGMA user_version=2;").unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        for (task, run, events) in history {
+            assert_eq!(store.get_task(&task.id).unwrap(), task);
+            assert_eq!(store.get_run(&run.id).unwrap(), run);
+            assert_eq!(store.list_events(&run.id, 0, 10).unwrap(), events);
+            if run.state == RunState::Unknown {
+                assert_eq!(store.process_group_id(&run.id).unwrap(), process_group_id);
+            }
+        }
+        let version: i64 = store
+            .0
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn failed_v2_catalog_migration_rolls_back_and_preserves_database() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("runs.sqlite3");
+        {
+            let _store = Store::open(&path).unwrap();
+        }
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("DROP TABLE team_members; DROP TABLE teams; DROP TABLE workspace_scopes; DROP TABLE workspaces; DROP TABLE agent_permission_configs; DROP TABLE catalog_audit; DROP TABLE catalog_settings; PRAGMA user_version=2;").unwrap();
+        drop(connection);
+
+        let error = match Store::open(&path) {
+            Ok(_) => panic!("catalog migration unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "storage.write-failed");
+        let connection = Connection::open(path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_roles'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(tables, 1); // the pre-existing conflicting table is retained
+        let partial_tables: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('agent_permission_configs','workspaces','workspace_scopes','teams','team_members','catalog_audit','catalog_settings')", [], |row| row.get(0)).unwrap();
+        assert_eq!(partial_tables, 0);
+    }
+
+    #[test]
     fn future_schema_is_rejected_without_modification() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("runs.sqlite3");
@@ -841,7 +1102,7 @@ mod tests {
         }
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .unwrap();
 
         let error = match Store::open(&path) {
@@ -853,7 +1114,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]

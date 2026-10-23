@@ -5,8 +5,11 @@ import { Bell, Check, Pause, ShieldCheck, X } from "lucide-vue-next";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import VocaButton from "@/components/ui/VocaButton.vue";
 import { useNotificationsStore } from "@/stores/notifications";
+import { useServices } from "@/services/adapters";
 
 const notifications = useNotificationsStore();
+const services = useServices();
+const isNative = services.mode === "tauri";
 const router = useRouter();
 
 onMounted(async () => {
@@ -30,9 +33,9 @@ async function open(id: string): Promise<void> {
 
 <template>
   <div class="v-content">
-    <PageHeader title="通知" subtitle="需要你关注的任务事件。通知只负责告诉你，审批操作仍在“待审批”中完成。">
+    <PageHeader title="通知" :subtitle="isNative ? '本机通知事件源尚未接入；当前不会显示演示消息。' : '需要你关注的任务事件。通知只负责告诉你，审批操作仍在“待审批”中完成。'">
       <template #actions>
-        <VocaButton :disabled="!notifications.unread" @click="notifications.markAllRead()">全部标为已读</VocaButton>
+        <VocaButton v-if="!isNative" :disabled="!notifications.unread" @click="notifications.markAllRead()">全部标为已读</VocaButton>
       </template>
     </PageHeader>
 
@@ -68,8 +71,8 @@ async function open(id: string): Promise<void> {
       </div>
       <div v-if="!notifications.visible.length" class="v-empty">
         <Bell :size="18" class="v-muted" />
-        <span class="text-[15px] font-semibold">没有未读通知</span>
-        <span class="v-small">新的审批请求与任务事件会出现在这里。</span>
+        <span class="text-[15px] font-semibold">{{ isNative ? "暂无本机通知" : "没有未读通知" }}</span>
+        <span class="v-small">{{ isNative ? "真实通知源尚未接入，因此不会生成演示消息。" : "新的审批请求与任务事件会出现在这里。" }}</span>
       </div>
     </div>
   </div>

@@ -67,7 +67,8 @@ async function prepare(): Promise<void> {
     optionsError.value = null;
     nativeTitle.value = "只读目录分析";
     nativePrompt.value = props.initialDescription?.trim() ? props.initialDescription : "请总结所选工作目录的主要结构和用途。只根据实际读取到的内容回答。不要修改文件或执行命令。";
-    nativeWorkspace.value = "";
+    if (!workspaces.workspaces.length) await workspaces.load();
+    nativeWorkspace.value = workspaces.workspaces.find((item) => item.name === props.defaultWorkspace)?.path ?? "";
     nativeConsent.value = false;
     nativeReadiness.value = null;
     nativeLoading.value = true;

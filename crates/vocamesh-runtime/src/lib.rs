@@ -1,5 +1,6 @@
 //! Local single-run execution lifecycle and SQLite history.
 
+mod catalog_store;
 mod snapshot;
 mod store;
 
@@ -21,9 +22,11 @@ use vocamesh_agent::execution::{
 #[cfg(not(windows))]
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
-    AuthenticationState, ExecutionReadiness, ExecutionRequest, ProcessGroupStatus, Provider,
-    RecoveryInspection, RecoveryResolution, RecoveryStatus, RunEvent, RunRecord, RunState,
-    ServiceError, SnapshotStatus, TaskRecord, UnknownRunSummary,
+    AddTeamMemberInput, AgentRole, AppearanceSettings, AuthenticationState, CatalogStatus,
+    CreateAgentInput, CreateTeamInput, CreateWorkspaceInput, ExecutionReadiness, ExecutionRequest,
+    ProcessGroupStatus, Provider, RecoveryInspection, RecoveryResolution, RecoveryStatus, RunEvent,
+    RunRecord, RunState, ServiceError, SnapshotStatus, TaskRecord, TeamRecord, UnknownRunSummary,
+    UpdateAgentInput, UpdateTeamInput, UpdateWorkspaceScopesInput, WorkspaceRecord,
 };
 
 const ERR_CLI: ServiceError = ServiceError::new(
@@ -48,6 +51,7 @@ const ERR_POLICY_UNVERIFIED: ServiceError = ServiceError::new(
     "execution.managed-policy-unverified",
     "无法确认 Claude Code 的组织托管 Hook 是否会产生额外副作用；真实执行已禁用",
 );
+const ERR_SETTINGS_INVALID: ServiceError = ServiceError::new("settings.invalid", "外观设置值无效");
 const ERR_DUPLICATE: ServiceError =
     ServiceError::new("execution.request-duplicate", "该请求编号已用于其他任务");
 const ERR_STOP: ServiceError = ServiceError::new("run.stop-failed", "无法向运行时发送停止请求");
@@ -221,6 +225,185 @@ impl ExecutionRuntime {
                 reason_code,
             }
         }
+    }
+
+    /// Catalog operations share the execution history database and deliberately do not consult readiness.
+    pub fn catalog_status(&self) -> Result<CatalogStatus, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_read())?
+            .catalog_status()
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<AgentRole>, ServiceError> {
+        self.store.lock().map_err(|_| storage_read())?.list_agents()
+    }
+
+    pub fn get_agent(&self, id: &str) -> Result<AgentRole, ServiceError> {
+        self.store.lock().map_err(|_| storage_read())?.get_agent(id)
+    }
+
+    pub fn create_agent(&self, input: CreateAgentInput) -> Result<AgentRole, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .create_agent(input)
+    }
+
+    pub fn update_agent(
+        &self,
+        id: &str,
+        input: UpdateAgentInput,
+    ) -> Result<AgentRole, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .update_agent(id, input)
+    }
+
+    pub fn archive_agent(&self, id: &str) -> Result<(), ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .archive_agent(id)
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_read())?
+            .list_workspaces()
+    }
+
+    pub fn get_workspace(&self, id: &str) -> Result<WorkspaceRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_read())?
+            .get_workspace(id)
+    }
+
+    pub fn create_workspace(
+        &self,
+        input: CreateWorkspaceInput,
+    ) -> Result<WorkspaceRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .create_workspace(input)
+    }
+
+    pub fn update_workspace_scopes(
+        &self,
+        id: &str,
+        input: UpdateWorkspaceScopesInput,
+    ) -> Result<WorkspaceRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .update_workspace_scopes(id, input)
+    }
+
+    pub fn rename_workspace(
+        &self,
+        id: &str,
+        name: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<WorkspaceRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .rename_workspace(id, name, expected_revision)
+    }
+
+    pub fn archive_workspace(&self, id: &str) -> Result<(), ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .archive_workspace(id)
+    }
+
+    pub fn list_teams(&self) -> Result<Vec<TeamRecord>, ServiceError> {
+        self.store.lock().map_err(|_| storage_read())?.list_teams()
+    }
+
+    pub fn get_team(&self, id: &str) -> Result<TeamRecord, ServiceError> {
+        self.store.lock().map_err(|_| storage_read())?.get_team(id)
+    }
+
+    pub fn create_team(&self, input: CreateTeamInput) -> Result<TeamRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .create_team(input)
+    }
+
+    pub fn update_team(
+        &self,
+        id: &str,
+        input: UpdateTeamInput,
+    ) -> Result<TeamRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .update_team(id, input)
+    }
+
+    pub fn add_team_member(
+        &self,
+        id: &str,
+        input: AddTeamMemberInput,
+    ) -> Result<TeamRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .add_team_member(id, input)
+    }
+
+    pub fn remove_team_member(&self, id: &str, agent_id: &str) -> Result<TeamRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .remove_team_member(id, agent_id)
+    }
+
+    pub fn set_team_reports_to(
+        &self,
+        id: &str,
+        agent_id: &str,
+        reports_to: &str,
+    ) -> Result<TeamRecord, ServiceError> {
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .set_team_reports_to(id, agent_id, reports_to)
+    }
+
+    pub fn appearance_settings(&self) -> Result<AppearanceSettings, ServiceError> {
+        let value = self
+            .store
+            .lock()
+            .map_err(|_| storage_read())?
+            .get_catalog_setting("appearance")?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(|_| storage_read()))
+            .unwrap_or_else(|| Ok(AppearanceSettings::default()))
+    }
+
+    pub fn update_appearance_settings(
+        &self,
+        settings: AppearanceSettings,
+    ) -> Result<AppearanceSettings, ServiceError> {
+        if !matches!(settings.theme.as_str(), "system" | "light" | "dark")
+            || !matches!(settings.density.as_str(), "comfortable" | "compact")
+        {
+            return Err(ERR_SETTINGS_INVALID);
+        }
+        let value = serde_json::to_string(&settings).map_err(|_| ERR_SETTINGS_INVALID)?;
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .set_catalog_setting("appearance", &value)?;
+        Ok(settings)
     }
 
     #[cfg(windows)]
@@ -1835,6 +2018,10 @@ esac
             failed.error_code.as_deref(),
             Some("execution.child-process-remained")
         );
+        let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+        while !runtime.active.lock().unwrap().is_empty() && Instant::now() < cleanup_deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
         assert!(runtime.active.lock().unwrap().is_empty());
     }
 
@@ -2170,5 +2357,58 @@ esac
             validate_request(&req).unwrap_err().code,
             "execution.consent-required"
         );
+    }
+
+    #[test]
+    fn catalog_crud_remains_available_while_execution_is_fail_closed() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let runtime =
+            ExecutionRuntime::open(dir.path().join("config"), dir.path().join("data")).unwrap();
+        let readiness = runtime.readiness();
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness.reason_code.as_deref(),
+            Some("execution.managed-policy-unverified")
+        );
+
+        let workspace = runtime
+            .create_workspace(CreateWorkspaceInput {
+                name: "Local".into(),
+                path: source.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        let agent = runtime
+            .create_agent(CreateAgentInput {
+                name: "Reviewer".into(),
+                role: "只读分析".into(),
+                provider_id: "claude".into(),
+                description: String::new(),
+                instructions: String::new(),
+                permissions: Default::default(),
+            })
+            .unwrap();
+        let team = runtime
+            .create_team(CreateTeamInput {
+                name: "Review team".into(),
+                supervisor_id: agent.id.clone(),
+                workspace_id: workspace.id,
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.get_team(&team.id).unwrap().members[0].agent_id,
+            agent.id
+        );
+        assert!(!runtime.readiness().ready);
+
+        let mut appearance = runtime.appearance_settings().unwrap();
+        appearance.theme = "dark".into();
+        runtime
+            .update_appearance_settings(appearance.clone())
+            .unwrap();
+        assert_eq!(runtime.appearance_settings().unwrap(), appearance);
+        assert_eq!(runtime.list_agents().unwrap().len(), 1);
     }
 }

@@ -4,8 +4,8 @@ import type { CreateTaskInput, Subtask, Task, TaskState } from "@/types";
  * 任务服务。
  *
  * 用途：任务创建、状态迁移、子任务、暂停/停止/继续/重试与部分成果。
- * 当前实现：MockTaskService（定时器驱动状态迁移，不代表真实执行）。
- * 未来实现：Rust Core 的任务编排；所有状态必须由运行时确认，不得前端推测。
+ * 浏览器实现：MockTaskService（定时器驱动状态迁移，不代表真实执行）。
+ * Tauri：列出 Runtime 持久化的本机任务，并仅支持文档限定的只读任务停止；其余编排操作未接入。
  */
 export interface TaskService {
   /** 列出任务。调用时机：S02/S06。 */
@@ -21,7 +21,7 @@ export interface TaskService {
    * 返回：状态为 queued 的任务（创建 ≠ 开始执行）。
    * 错误：无可用执行者 `task.no-executor`、工作空间不存在 `task.workspace-missing`。
    * Mock：团队/单 Agent 模式在 1.4s 后迁移到 running；自定义占位保持 draft，直到计划编辑能力实现。
-   * Rust：入队 + 运行环境检查后再派发；失败要给出可解释原因。
+   * Tauri：通过带用户确认的只读任务入口创建；通用任务创建暂不支持。
    */
   createTask(input: CreateTaskInput): Promise<Task>;
 
@@ -32,7 +32,7 @@ export interface TaskService {
    * 语义：先停止派发新工作 → 当前执行到达安全边界 → 才可进入 paused。
    * 错误：`task.illegal-transition`。
    * Mock：先 pause-pending，1.7s 后 paused。
-   * Rust：向运行时发送暂停信号并等待确认；未确认不得显示“已暂停”。
+   * Tauri：本阶段不支持暂停。
    */
   pauseTask(id: string): Promise<Task>;
 

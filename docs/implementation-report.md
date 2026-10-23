@@ -179,3 +179,52 @@
 - macOS 原生 GUI 为 **BLOCKED**（缺完整 Xcode/可验收窗口）；Windows、Linux、Playwright E2E、PowerShell 验证脚本和远端 CI 未执行。仓库没有新增 GitHub Actions workflow。
 - PGID 不存在仅是必要检查之一，不能证明脱离原进程组的后代已退出；需要用户在系统进程管理工具中人工核验并确认。无法确认时记录、快照和新任务阻塞都保留。
 - 本地 Rust、前端测试、静态检查和构建通过，不代表真实模型成功、桌面 GUI 验收或跨平台运行通过。v0.3 真实执行验收仍未完成。
+
+---
+
+# VocaMesh v0.4 Real Backend 实施报告
+
+> 状态：Catalog 数据层、Tauri IPC、原生服务与页面联动及本地自动化 **PASS**；macOS 原生 GUI、Windows/Linux 桌面运行 **BLOCKED / 未验收**。真实 Agent 执行仍保持 fail-closed，v0.4 不代表多 Agent 执行能力已经交付。
+
+## 基线与范围
+
+- 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.4-native-catalog`。
+- 基线：`origin/main` / `30707916b0d407d910a3550ac1e849018b6e9881`，与本轮开始时的 `HEAD` 一致。
+- 保留初始存在的无关未跟踪项 `.DS_Store`、`crates/.DS_Store`、`.idea/`、`UI/.write-test`；本轮没有改动或暂存这些项。
+- 本阶段实现共享 SQLite 文件中的 Agent、Workspace、Team、关系、审计和外观偏好配置；没有创建第二套 Runtime/数据库，也没有开发 Team 调度或 Agent 执行。
+
+## 实施结果
+
+- **schema v3 与迁移 — PASS。** 新库直接创建 v3；v1 通过原 v1→v2 和新增 v2→v3 连续迁移，v2→v3 采用事务。测试验证 v1/v2 的 Task、成功/失败/unknown Run、Event、未知 Run 的恢复字段及进程组 ID 保留；失败迁移回滚、未来 schema 拒绝打开；新 Catalog 表不含演示种子。
+- **Rust Catalog — PASS。** Agent 角色及权限草稿、Workspace 与读/写/禁止范围、Team、主管和成员关系、外观偏好通过现有 `ExecutionRuntime`/SQLite 保存；新增关闭后重新打开 SQLite Store 的持久化测试覆盖实体、关系、范围草稿和外观设置。后端校验名称、Provider、路径、范围、外键、引用归档、版本冲突和组织环；重命名保持稳定 ID 关联。目录丢失时保留记录并把 `pathAvailable` 标为 false，且拒绝把失效目录绑定到新 Team 或作为改绑目标。
+- **Tauri IPC / 原生 Services — PASS。** 增加 Catalog Commands 并注册到 Tauri；配置 CRUD 在 execution readiness 为 false 时仍可用。原生 `createServices()` 显式组装服务，Catalog IPC 或存储失败显示稳定错误并允许重试，不回退到 Mock；Approval/Notification 保持真实空状态。浏览器 Mock 服务及其演示数据仍可用。
+- **桌面页面 — PASS（自动化范围）。** Agent、Workspace、Team 使用已保存记录及稳定 ID；Agent 状态区分“已配置”和“执行未开放”；原生 Workspace 支持系统目录选择器、改名、范围草稿和归档；Dashboard/CreateTask 不再用 Catalog Mock 种子绕过 readiness。原生隐藏模拟交通灯、Mock 标签和未实现的审批授权；即使 Pinia 中残留旧审批项，原生审批页面仍强制显示安全空态。任务筛选由实际 Workspace/Task 数据生成，Team 过滤器仅在 Mock 显示；原生 Task 不再伪造子任务。设置仅持久化外观字段，失败时保留草稿并提供重试；Workspace 编辑把载入时 revision 传到后端，避免旧草稿覆盖。
+- **执行安全边界 — PASS（静态检查与自动化）。** `ManagedPolicyStatus::Unverified`、`execution.managed-policy-unverified` 与现有任务启动检查未放宽；权限和 Workspace 范围只作为未启用配置。没有启动真实 CLI、发起真实模型请求、读取凭据正文或新增 GitHub Actions。
+
+## 本轮本地质量门禁
+
+最终执行 `./scripts/verify-local.sh`，退出码 `0`，所有脚本步骤 PASS：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | PASS |
+| `cargo test --workspace --offline --quiet` | PASS：73 项（Agent 25、Core 2、Runtime 46） |
+| `cargo check --workspace --all-targets --all-features --offline` | PASS，包含 Tauri 桌面 crate |
+| `pnpm --dir frontend typecheck` | PASS |
+| `pnpm --dir frontend test` | PASS：11 个文件、41 项测试 |
+| `pnpm --dir frontend build` | PASS：Vite 生产构建 |
+| `git diff --check` | PASS |
+
+新增测试覆盖迁移历史与回滚、Catalog 校验及关系、readiness 被阻断时的 Catalog 可用性、原生 Services 不回退 Mock、原生空状态、Pinia 错误/重试与外观草稿。通过后的测试结果均来自本轮本机运行；不代表 GUI 或平台验收。
+
+## GUI 与平台验收边界
+
+- **macOS 原生 GUI：BLOCKED。** 本机 `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，`xcodebuild -version` 要求完整 Xcode。没有可验收的原生窗口，因此未操作实际窗口交通灯、重启持久性、系统目录选择、完整跨页组织关系，也没有 GUI 截图。逐项状态记录于 `docs/v0.4-gui-acceptance.md`。
+- **Windows / Linux：未验收。** 本轮未在这些平台构建或运行原生桌面应用。
+- **真实 CLI / 模型：未运行。** 没有真实任务、模型费用或凭据正文访问；fake CLI 和 Rust 单测不是生产 Agent 验收。
+- **Playwright E2E / 远端 CI：未运行。** 本轮只记录本地脚本实际执行结果；未新增或恢复 GitHub Actions。
+
+## 结论与剩余限制
+
+v0.4 的本地 Catalog 与桌面原生数据接线已完成，自动化质量门禁全部通过。实际桌面关闭/重启再打开、目录选择和跨页面生命周期尚未由人工 GUI 验收；Windows/Linux、Playwright E2E 也没有结果。原生功能面因此不能记为完整手工验收通过。`execution.managed-policy-unverified` 继续阻止真实任务，不能将此阶段描述为真实单 Agent 或多 Agent 执行已完成。

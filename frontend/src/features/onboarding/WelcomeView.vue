@@ -7,8 +7,11 @@ import VocaStatus from "@/components/ui/VocaStatus.vue";
 import { useAppStore } from "@/stores/app";
 import { useToolsStore } from "@/stores/tools";
 import { toolStateMeta } from "@/lib/status";
+import { useServices } from "@/services/adapters";
 
 const app = useAppStore();
+const services = useServices();
+const mockPreview = services.mode === "mock";
 const tools = useToolsStore();
 const router = useRouter();
 const scanning = ref(false);
@@ -35,7 +38,7 @@ async function start(): Promise<void> {
 
 <template>
   <div class="flex h-screen flex-col" :style="{ background: 'var(--bg-canvas)' }">
-    <div class="v-titlebar">
+    <div v-if="mockPreview" class="v-titlebar">
       <div class="v-lights"><span class="v-light r" /><span class="v-light y" /><span class="v-light g" /></div>
       <span class="v-small" :style="{ color: 'var(--text-muted)' }">VocaMesh — 首次启动</span>
       <span class="v-kbd" style="text-transform: uppercase; letter-spacing: 0.4px; border-style: dashed">mock 演示 · 不调用真实 CLI</span>
@@ -53,14 +56,14 @@ async function start(): Promise<void> {
         <div class="flex flex-col gap-[6px]">
           <h1 class="text-[25px] font-semibold" :style="{ margin: 0, letterSpacing: '-0.5px' }">欢迎使用 VocaMesh</h1>
           <p class="v-small v-secondary" :style="{ margin: 0, lineHeight: 1.65 }">
-            VocaMesh 在本机调用你已安装的 Agent 工具，帮你把一件工作交给多个 Agent 协作完成。这里不需要创建组织，也不需要输入任何 API Key。
+            {{ mockPreview ? "VocaMesh 在本机调用你已安装的 Agent 工具，帮你把一件工作交给多个 Agent 协作完成。这里不需要创建组织，也不需要输入任何 API Key。" : "VocaMesh 将本地保存 Agent、工作空间和团队配置。当前原生执行仍受安全策略限制，不会启动 Agent 任务。" }}
           </p>
         </div>
 
         <div class="v-card" :style="{ overflow: 'hidden' }">
           <div class="v-row-between" :style="{ padding: '8px 12px', background: 'var(--bg-inset)', fontSize: '11.5px' }">
             <b>{{ scanning ? "正在检查本机可用的执行工具…" : "本机可用的执行工具" }}</b>
-            <span class="v-tiny v-muted">{{ scanning ? "扫描中" : "上次扫描 3 秒前" }}</span>
+            <span class="v-tiny v-muted">{{ scanning ? "扫描中" : mockPreview ? "上次扫描 3 秒前" : "状态来自本机探测" }}</span>
           </div>
           <div :style="{ padding: '0 12px' }">
             <div v-for="tool in tools.tools" :key="tool.id" class="flex items-center gap-[10px] border-t py-[9px]" :style="{ borderColor: 'var(--border-default)' }">
@@ -88,7 +91,7 @@ async function start(): Promise<void> {
         </div>
       </div>
 
-      <p class="v-tiny v-muted">下一步可选：创建第一个 Agent 角色（也可稍后在左侧“Agent 角色”中完成）</p>
+      <p class="v-tiny v-muted">{{ mockPreview ? "下一步可选：创建第一个 Agent 角色（也可稍后在左侧“Agent 角色”中完成）" : "下一步可选：登记工作空间并创建 Agent 角色；这些配置不会授予执行权限。" }}</p>
     </div>
   </div>
 </template>
