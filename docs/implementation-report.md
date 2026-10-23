@@ -190,6 +190,7 @@
 
 - 仓库：`MauriceLiang/VocaMesh`；分支：`feature/v0.4-native-catalog`。
 - 基线：`origin/main` / `30707916b0d407d910a3550ac1e849018b6e9881`，与本轮开始时的 `HEAD` 一致。
+- 实施提交：`12c42d94b4ded046cf3f1d886c2b797ee1bdd1a2`；PR [#7 v0.4 Real Backend Catalog](https://github.com/MauriceLiang/VocaMesh/pull/7) 已创建，当前未合并。
 - 保留初始存在的无关未跟踪项 `.DS_Store`、`crates/.DS_Store`、`.idea/`、`UI/.write-test`；本轮没有改动或暂存这些项。
 - 本阶段实现共享 SQLite 文件中的 Agent、Workspace、Team、关系、审计和外观偏好配置；没有创建第二套 Runtime/数据库，也没有开发 Team 调度或 Agent 执行。
 
