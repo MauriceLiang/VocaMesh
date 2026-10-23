@@ -134,3 +134,48 @@
 - 当前没有跨重启的进程身份核验和人工解除 `unknown` 的 UI；PID 仅保留为诊断/恢复所需信息，不会单凭旧 PID 终止进程。
 - 非 Unix 快照复制路径仍为保守实现；Windows 真实执行禁用，Linux 无本机验证。文件排除和输出脱敏仍是防御性过滤，不构成通用操作系统沙箱。
 - 本地自动化全部通过，但不能据此标记真实任务、GUI、平台或 CI 验收通过；v0.3 阶段继续未完成。
+
+---
+
+# VocaMesh v0.3.1 Runtime 恢复与安全边界实施报告
+
+> 状态：Runtime、数据库迁移、恢复 IPC、前端面板、ADR 与本地自动化 **PASS**；macOS 原生 GUI **BLOCKED**；真实 CLI/模型、Windows、Linux、Playwright E2E 和远端 CI 未验收。v0.3 真实执行仍保持 fail-closed，不能据此标记真实执行验收完成。
+
+## 基线与工作区
+
+- 基线：`origin/main` / `eb94b54b0e3b51e4e6c685a2caa3833a63f14930`；分支：`feature/v0.3.1-runtime-recovery`。
+- 开始前重新运行 `./scripts/verify-local.sh`，作为本轮基线验证；结果通过。没有覆盖或清理既有未跟踪项 `.DS_Store`、`.idea/`、`UI/.write-test`。
+- 系统：macOS Darwin 24.6 arm64。`xcode-select -p` 为 `/Library/Developer/CommandLineTools`；`xcodebuild -version` 明确报错：当前 developer directory 是 Command Line Tools，`xcodebuild` 需要完整 Xcode。
+
+## 实施结果
+
+- **M1 — PASS：ADR 0001。** 记录 Claude Code CLI、直接 API Provider、OS 沙箱/VM 和用户风险开关四种路线；当前选择继续 CLI fail-closed，其他真实执行路线等待维护者决策。依据链接指向 Anthropic 官方 CLI、settings 与 hooks 文档。
+- **M2 — PASS：schema v2。** 新库初始化 v2；v1→v2 migration 在事务内增加 PGID、恢复状态和最近检查时间，不删除历史；未来 schema 版本拒绝打开。启动恢复会将 active Run 置为 `unknown`、保留原错误码并写固定审计事件；缺失 PGID 的旧记录标为 `manual_required`。
+- **M3 — PASS：后端协议。** 提供列出、检查、恢复命令。Unix 仅将 `ESRCH` 作为退出候选；PGID 缺失、仍存在、权限/系统调用失败或不支持平台都不能归档。归档由 `start_gate` 串行化，要求用户确认，后端再次核验，事务将 Run 置为失败并审计，提交后才清理后端派生的快照路径。清理失败保持失败归档并写固定诊断，不重跑、不标成功、不解除 managed policy 门禁。
+- **M4 — PASS：诊断与面板。** Readiness 增加稳定原因码；恢复面板接入创建入口和原生 Unknown Run 详情页。只展示短 Run ID、标题、稳定错误码、状态、快照存在情况和检查时间。PGID 不经 IPC 暴露；Mock 恢复列表为空且不调用 Tauri。
+- **M5 — PASS：自动化。** 覆盖空库 v2、v1 历史迁移、migration 事务回滚、future schema 拒绝、错误码保留、恢复审计、PGID 状态分类、人工确认、进程组仍存在时阻止归档、数据库审计失败回滚、目录描述符安全清理及清理失败；前端覆盖人工处理状态、退出候选二次确认、IPC 错误保留数据和 Tauri/Mock 服务边界。
+- **M6 — BLOCKED：未进行原生 GUI 验收。** 当前仅有 Command Line Tools 且没有完整 Xcode；未启动可验收原生窗口，未操作目录选择、恢复面板桌面流程或重启恢复。组件测试和构建不替代 GUI 验收。
+
+## 本轮本地质量门禁
+
+最终执行 `./scripts/verify-local.sh`，脚本退出码 `0`：
+
+| 命令 | 结果 | 证据 |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | PASS | 脚本退出码 0 |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | PASS | 脚本退出码 0 |
+| `cargo test --workspace --offline --quiet` | PASS | Agent 25、Core 2、Runtime 38，共 65 项 |
+| `cargo check --workspace --all-targets --all-features --offline` | PASS | 脚本退出码 0，包含桌面 crate 检查 |
+| `pnpm --dir frontend typecheck` | PASS | `vue-tsc --noEmit` |
+| `pnpm --dir frontend test` | PASS | 8 个文件、32 项测试 |
+| `pnpm --dir frontend build` | PASS | Vite 生产构建 |
+| `git diff --check` | PASS | 脚本退出码 0 |
+
+测试编写阶段，新 schema 测试首先按预期因空库仍为 v1 失败；实现迁移后通过。完整门禁第一次发现 3 条 Clippy 错误，完成最小修复后最终整套门禁再次通过。
+
+## 未执行与剩余限制
+
+- 本轮没有启动真实 CLI 任务、发起模型请求或产生新的模型调用费用；生产 readiness 仍由 `execution.managed-policy-unverified` 阻断。上一轮真实 CLI exit code 1 记录没有被本轮重试或覆盖。
+- macOS 原生 GUI 为 **BLOCKED**（缺完整 Xcode/可验收窗口）；Windows、Linux、Playwright E2E、PowerShell 验证脚本和远端 CI 未执行。仓库没有新增 GitHub Actions workflow。
+- PGID 不存在仅是必要检查之一，不能证明脱离原进程组的后代已退出；需要用户在系统进程管理工具中人工核验并确认。无法确认时记录、快照和新任务阻塞都保留。
+- 本地 Rust、前端测试、静态检查和构建通过，不代表真实模型成功、桌面 GUI 验收或跨平台运行通过。v0.3 真实执行验收仍未完成。

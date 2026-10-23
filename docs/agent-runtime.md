@@ -38,7 +38,15 @@ Runtime 先规范化并拒绝过宽工作区，再在 Unix/macOS 打开并保留
 
 Unix 进程以独立进程组启动。停止/超时先 `SIGTERM`，等待 2 秒后 `SIGKILL`；无论主进程是否正常退出，都检查进程组是否仍有成员。残留后代会被终止，确认后将任务记为失败；无法确认退出时 Run 记为 `unknown`。
 
-只有终态写入 SQLite 成功且结果并非 `unknown` 后才清理快照。无法确认进程树、状态查询失败或终态写入失败时保留快照和已有 PID/进程组号，清除内存停止通道，但 SQLite `unknown`/active 状态阻止后续任务。重启只把残留 active Run 标成 `unknown`，不自动重跑，也不会只凭旧 PID 杀进程。当前没有跨重启进程身份核验和人工解除 unknown 的 UI。
+只有终态写入 SQLite 成功且结果并非 `unknown` 后才清理快照。无法确认进程树、状态查询失败或终态写入失败时保留快照和已有 PID/进程组号，清除内存停止通道，但 SQLite `unknown`/active 状态阻止后续任务。
+
+SQLite schema v2 增加 `process_group_id`、`recovery_status`（`none`、`required`、`resolved`、`manual_required`）和 `recovery_checked_at`。v1→v2 migration 使用事务并保留所有 Task、Run、Event；未来 schema 版本拒绝打开，不降级、不重建。旧 active Run 进入 `unknown` 并产生固定 `recovery-required` 事件；没有持久化 PGID 的历史 Run 只能进入 `manual_required`。
+
+Runtime 提供 `list_unknown_runs`、`inspect_unknown_run` 和 `resolve_unknown_run`。检查仅报告进程组状态并更新最近检查时间，不改变 Run 结果、不杀进程；`ESRCH` 只产生 `exited-candidate`。PGID 存在、状态无法核验、PGID 缺失或平台不支持时，Unknown Run、快照和启动阻塞都保留。进程组退出也不能证明脱离原组的后代不存在。
+
+归档需要用户在操作系统进程管理工具中人工核验并明确确认。Runtime 在 `start_gate` 内重新检查 PGID、事务更新任务/Run 并写入审计事件；Run 归档为失败，原 `error_code` 保留。数据库提交后才删除由受信任数据目录和 UUID 请求 ID 派生的快照；Unix 清理通过 `O_NOFOLLOW` 目录描述符和 `unlinkat` 执行，清理失败留下固定审计事件并经 `RecoveryResolution.snapshotStatus` 返回，不会将 Run 改为成功或自动重跑。恢复状态、PGID 和最近检查时间不会改变 `execution.managed-policy-unverified` 的生产门禁。
+
+`ExecutionReadiness.reasonCode` 区分 Unknown Run、managed policy、CLI 缺失/不兼容、认证未知/未登录、平台禁用与存储错误。存储检查错误不会被归类成进程未知；策略门禁仍先于 CLI 认证探测。桌面恢复面板展示短 Run ID、任务标题、状态、错误码、快照存在状态和操作指引；不展示绝对路径、不接受前端进程标识，不提供强杀、删快照解锁或重试。
 
 ## 输出与结果
 
