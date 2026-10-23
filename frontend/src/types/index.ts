@@ -265,6 +265,30 @@ export interface NativeRunRecord {
   outputTruncated: boolean;
   processId: number | null;
   errorCode: string | null;
+  recoveryStatus: RecoveryStatus;
+  recoveryCheckedAt: number | null;
+}
+
+export type RecoveryStatus = "none" | "required" | "resolved" | "manual-required";
+export type ProcessGroupStatus = "exited-candidate" | "still-running" | "cannot-verify" | "manual-required";
+export type SnapshotStatus = "exists" | "missing" | "cannot-verify";
+
+export interface UnknownRunSummary {
+  run: NativeRunRecord;
+  taskTitle: string;
+  snapshotStatus: SnapshotStatus;
+}
+
+export interface RecoveryInspection {
+  run: NativeRunRecord;
+  taskTitle: string;
+  processGroupStatus: ProcessGroupStatus;
+  snapshotStatus: SnapshotStatus;
+}
+
+export interface RecoveryResolution {
+  run: NativeRunRecord;
+  snapshotStatus: SnapshotStatus;
 }
 
 export interface NativeRunEvent {
@@ -280,6 +304,7 @@ export interface ExecutionReadiness {
   version: string | null;
   authState: ToolAuthState;
   message: string;
+  reasonCode: string | null;
 }
 
 export interface StartReadOnlyTaskInput {

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ExecutionService, TaskService, RunService, EventService } from "@/services/contracts";
 import { ServiceError } from "@/types";
-import type { ExecutionReadiness, LogLine, NativeRunEvent, NativeRunRecord, NativeTaskRecord, RunArtifactGroup, RunRecord, StartReadOnlyTaskInput, Task } from "@/types";
+import type { ExecutionReadiness, LogLine, NativeRunEvent, NativeRunRecord, NativeTaskRecord, RecoveryInspection, RecoveryResolution, RunArtifactGroup, RunRecord, StartReadOnlyTaskInput, Task, UnknownRunSummary } from "@/types";
 
 interface IpcError { code: string; message: string }
 interface RunPage { items: NativeRunRecord[]; hasMore: boolean; nextCursor: number | null }
@@ -24,6 +24,9 @@ export function createTauriExecutionService(): ExecutionService {
   return {
     selectWorkspaceDirectory: () => call<string | null>("select_workspace_directory"),
     readiness: () => call<ExecutionReadiness>("get_execution_readiness"),
+    listUnknownRuns: () => call<UnknownRunSummary[]>("list_unknown_runs"),
+    inspectUnknownRun: (runId) => call<RecoveryInspection>("inspect_unknown_run", { runId }),
+    resolveUnknownRun: (runId, userConfirmed) => call<RecoveryResolution>("resolve_unknown_run", { runId, userConfirmed }),
     startReadOnlyTask: (input: StartReadOnlyTaskInput) => call<StartResponse>("start_read_only_task", { request: input }),
     stopRun: (runId) => call<NativeRunRecord>("stop_run", { runId }),
     getRun: (runId) => call<NativeRunRecord>("get_run", { runId }),

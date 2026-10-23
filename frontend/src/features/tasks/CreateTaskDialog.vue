@@ -6,6 +6,7 @@ import VocaButton from "@/components/ui/VocaButton.vue";
 import VocaTextarea from "@/components/ui/VocaTextarea.vue";
 import VocaSelect from "@/components/ui/VocaSelect.vue";
 import VocaInput from "@/components/ui/VocaInput.vue";
+import RuntimeRecoveryPanel from "@/features/tasks/RuntimeRecoveryPanel.vue";
 import type { CreateTaskInput, ExecutionReadiness, Task } from "@/types";
 import { useAgentsStore } from "@/stores/agents";
 import { useTeamsStore } from "@/stores/teams";
@@ -71,7 +72,7 @@ async function prepare(): Promise<void> {
     nativeReadiness.value = null;
     nativeLoading.value = true;
     try { nativeReadiness.value = await services.execution.readiness(); }
-    catch { nativeReadiness.value = { ready: false, version: null, authState: "unknown", message: "无法读取本机执行安全状态" }; }
+    catch { nativeReadiness.value = { ready: false, version: null, authState: "unknown", message: "无法读取本机执行安全状态", reasonCode: "storage.read-failed" }; }
     finally { nativeLoading.value = false; }
     return;
   }
@@ -205,6 +206,7 @@ async function submitNative(): Promise<void> {
       <div class="v-banner" :class="nativeReadiness?.ready ? 'is-neutral' : 'is-blocked'">
         <span class="v-tiny">{{ nativeLoading ? '正在检查组织托管策略、CLI 版本与登录状态…' : nativeReadiness?.message ?? '正在检查执行条件' }}</span>
       </div>
+      <RuntimeRecoveryPanel v-if="nativeReadiness?.reasonCode === 'execution.process-state-unknown'" />
       <div v-if="optionsError" class="v-banner is-failure"><AlertTriangle :size="13" /><span class="v-tiny">{{ optionsError }}</span></div>
     </template>
     <template v-else>
