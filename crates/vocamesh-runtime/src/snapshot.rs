@@ -127,12 +127,23 @@ fn copy_snapshot(source: &ValidatedWorkspace, destination: &Path) -> Result<(), 
 
 #[cfg(unix)]
 fn open_directory_path(path: &Path) -> std::io::Result<std::fs::File> {
+    let canonical = fs::canonicalize(path)?;
+    open_normalized_directory_path(&canonical)
+}
+
+#[cfg(unix)]
+fn open_normalized_directory_path(path: &Path) -> std::io::Result<std::fs::File> {
     use std::{
         ffi::CString,
         os::{fd::FromRawFd, unix::ffi::OsStrExt},
     };
 
-    let canonical = fs::canonicalize(path)?;
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path must be absolute",
+        ));
+    }
     let root = CString::new("/").expect("static path has no NUL");
     let root_fd = unsafe {
         libc::open(
@@ -144,7 +155,7 @@ fn open_directory_path(path: &Path) -> std::io::Result<std::fs::File> {
         return Err(std::io::Error::last_os_error());
     }
     let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
-    for component in canonical.components() {
+    for component in path.components() {
         let std::path::Component::Normal(name) = component else {
             if matches!(component, std::path::Component::RootDir) {
                 continue;
@@ -164,6 +175,142 @@ fn open_directory_path(path: &Path) -> std::io::Result<std::fs::File> {
         )?;
     }
     Ok(directory)
+}
+
+#[cfg(unix)]
+pub(crate) fn remove_snapshot(snapshot_root: &Path, request_id: &str) -> std::io::Result<()> {
+    use std::ffi::CString;
+
+    let root = match open_normalized_directory_path(snapshot_root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let name = CString::new(request_id.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid request id"))?;
+    let metadata = match stat_at(&root, &name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot is not a directory",
+        ));
+    }
+    let root_device = file_stat(&root)?.st_dev;
+    remove_directory_entry_at(&root, &name, root_device)
+}
+
+#[cfg(unix)]
+fn remove_directory_entry_at(
+    parent: &std::fs::File,
+    name: &std::ffi::CStr,
+    root_device: libc::dev_t,
+) -> std::io::Result<()> {
+    use std::{
+        ffi::CString,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    };
+
+    let before = stat_at(parent, name)?;
+    match before.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => {
+            if before.st_dev != root_device {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "snapshot crosses a filesystem boundary",
+                ));
+            }
+            let child = open_at(
+                parent,
+                name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )?;
+            let opened = file_stat(&child)?;
+            if !same_file(&before, &opened) || opened.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "snapshot directory changed during cleanup",
+                ));
+            }
+            for entry in directory_entries(&child)? {
+                let child_name = CString::new(entry.as_bytes()).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid entry name")
+                })?;
+                remove_directory_entry_at(&child, &child_name, root_device)?;
+            }
+            let current = stat_at(parent, name)?;
+            if !same_file(&before, &current) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "snapshot directory changed during cleanup",
+                ));
+            }
+            let result =
+                unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+        libc::S_IFREG | libc::S_IFLNK => {
+            let current = stat_at(parent, name)?;
+            if !same_file(&before, &current) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "snapshot entry changed during cleanup",
+                ));
+            }
+            let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot contains a special file",
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn remove_snapshot(snapshot_root: &Path, request_id: &str) -> std::io::Result<()> {
+    let root_metadata = match fs::symlink_metadata(snapshot_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot root is not a directory",
+        ));
+    }
+    let canonical_root = fs::canonicalize(snapshot_root)?;
+    if canonical_root != snapshot_root {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot root is not normalized",
+        ));
+    }
+    let target = canonical_root.join(request_id);
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot is not a directory",
+        ));
+    }
+    fs::remove_dir_all(target)
 }
 
 #[cfg(unix)]
@@ -475,6 +622,49 @@ mod tests {
         {
             ValidatedWorkspace { path }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_snapshot_cleanup_uses_directory_descriptors_and_does_not_follow_links() {
+        use std::os::unix::fs::symlink;
+
+        let data = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let snapshot_root = fs::canonicalize(data.path()).unwrap().join("run-snapshots");
+        let snapshot = snapshot_root.join("00000000-0000-4000-8000-000000000001");
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("README.md"), "synthetic snapshot").unwrap();
+        fs::write(outside.path().join("keep.txt"), "outside data").unwrap();
+        symlink(outside.path(), snapshot.join("external-link")).unwrap();
+
+        remove_snapshot(&snapshot_root, "00000000-0000-4000-8000-000000000001").unwrap();
+
+        assert!(!snapshot.exists());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("keep.txt")).unwrap(),
+            "outside data"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_snapshot_cleanup_rejects_a_symlinked_snapshot_root() {
+        use std::os::unix::fs::symlink;
+
+        let data = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let snapshot_root = fs::canonicalize(data.path()).unwrap().join("run-snapshots");
+        let snapshot = outside.path().join("00000000-0000-4000-8000-000000000002");
+        fs::create_dir(&snapshot).unwrap();
+        fs::write(snapshot.join("keep.txt"), "outside data").unwrap();
+        symlink(outside.path(), &snapshot_root).unwrap();
+
+        assert!(remove_snapshot(&snapshot_root, "00000000-0000-4000-8000-000000000002").is_err());
+        assert_eq!(
+            fs::read_to_string(snapshot.join("keep.txt")).unwrap(),
+            "outside data"
+        );
     }
 
     #[test]

@@ -21,8 +21,9 @@ use vocamesh_agent::execution::{
 #[cfg(not(windows))]
 use vocamesh_agent::AgentRuntime;
 use vocamesh_core::{
-    AuthenticationState, ExecutionReadiness, ExecutionRequest, Provider, RunEvent, RunRecord,
-    RunState, ServiceError, TaskRecord,
+    AuthenticationState, ExecutionReadiness, ExecutionRequest, ProcessGroupStatus, Provider,
+    RecoveryInspection, RecoveryResolution, RecoveryStatus, RunEvent, RunRecord, RunState,
+    ServiceError, SnapshotStatus, TaskRecord, UnknownRunSummary,
 };
 
 const ERR_CLI: ServiceError = ServiceError::new(
@@ -143,18 +144,29 @@ impl ExecutionRuntime {
     }
 
     pub fn readiness(&self) -> ExecutionReadiness {
-        let (uncertain, active) = match self.store.lock() {
-            Ok(store) => (
-                store.has_uncertain_process().unwrap_or(true),
-                store.has_active().unwrap_or(true),
-            ),
-            Err(_) => (true, true),
+        let store = match self.store.lock() {
+            Ok(store) => store,
+            Err(_) => return not_ready("storage.read-failed", "本地任务历史无法读取"),
+        };
+        let uncertain = match store.has_uncertain_process() {
+            Ok(value) => value,
+            Err(error) => return not_ready(error.code, error.message),
+        };
+        let active = match store.has_active() {
+            Ok(value) => value,
+            Err(error) => return not_ready(error.code, error.message),
         };
         if uncertain {
-            return not_ready("先前进程状态无法确认；为避免重复启动，真实执行已暂停");
+            return not_ready(
+                "execution.process-state-unknown",
+                "先前进程状态无法确认；为避免重复启动，真实执行已暂停",
+            );
         }
         if active {
-            return not_ready("本机 Run 尚未完成状态核对；真实执行已暂停");
+            return not_ready(
+                "execution.already-running",
+                "本机 Run 尚未完成状态核对；真实执行已暂停",
+            );
         }
         #[cfg(windows)]
         {
@@ -163,23 +175,34 @@ impl ExecutionRuntime {
                 version: None,
                 auth_state: AuthenticationState::Unknown,
                 message: "Windows 进程树停止策略尚未通过验证，真实执行暂不可用".into(),
+                reason_code: Some("execution.platform-unsupported".into()),
             };
         }
         #[cfg(not(windows))]
         {
             if self.managed_policy == ManagedPolicyStatus::Unverified {
-                return not_ready(ERR_POLICY_UNVERIFIED.message);
+                return not_ready(ERR_POLICY_UNVERIFIED.code, ERR_POLICY_UNVERIFIED.message);
             }
             let tools = AgentRuntime::new(self.config_dir.clone());
             let Ok(path) = tools.executable_path(Provider::Claude) else {
-                return not_ready("未找到 Claude Code CLI");
+                return not_ready("execution.cli-not-found", "未找到受支持的 Claude Code CLI");
             };
             let environment = ExecutionEnvironment::current();
             let Ok(cli) = ClaudeCli::verify_with_environment(&path, environment) else {
-                return not_ready("Claude Code CLI 版本或安全参数不兼容");
+                return not_ready(
+                    "execution.cli-incompatible",
+                    "Claude Code CLI 版本或安全参数不兼容",
+                );
             };
             let auth_state = cli.authentication_state();
             let ready = auth_state == AuthenticationState::Authenticated;
+            let reason_code = match auth_state {
+                AuthenticationState::Authenticated => None,
+                AuthenticationState::Unauthenticated => Some("execution.auth-required".into()),
+                AuthenticationState::Unknown | AuthenticationState::Unsupported => {
+                    Some("execution.auth-unknown".into())
+                }
+            };
             let message = match auth_state {
                 AuthenticationState::Authenticated => "Claude Code CLI 已登录，可开始单次只读任务",
                 AuthenticationState::Unauthenticated => "Claude Code CLI 未登录，请先在 CLI 中登录",
@@ -195,6 +218,7 @@ impl ExecutionRuntime {
                 )),
                 auth_state,
                 message: message.into(),
+                reason_code,
             }
         }
     }
@@ -334,6 +358,7 @@ impl ExecutionRuntime {
             RunState::StopRequested,
             "stop-pending",
             None,
+            None,
         )?;
         notify(RuntimeNotification::State(state.clone()));
         if !state.state.is_active() {
@@ -411,6 +436,181 @@ impl ExecutionRuntime {
 
     pub fn get_run(&self, id: &str) -> Result<RunRecord, ServiceError> {
         self.store.lock().map_err(|_| storage_read())?.get_run(id)
+    }
+
+    pub fn list_unknown_runs(&self) -> Result<Vec<UnknownRunSummary>, ServiceError> {
+        let _gate = self.start_gate.lock().map_err(|_| storage_write())?;
+        let records = self
+            .store
+            .lock()
+            .map_err(|_| storage_read())?
+            .list_unknown_runs()?;
+        Ok(records
+            .into_iter()
+            .map(|(run, task_title)| UnknownRunSummary {
+                snapshot_status: self.snapshot_status(&run.request_id),
+                run,
+                task_title,
+            })
+            .collect())
+    }
+
+    pub fn inspect_unknown_run(&self, run_id: &str) -> Result<RecoveryInspection, ServiceError> {
+        let _gate = self.start_gate.lock().map_err(|_| storage_write())?;
+        validate_run_id(run_id)?;
+        let process_group_id = {
+            let store = self.store.lock().map_err(|_| storage_read())?;
+            let run = store.get_run(run_id)?;
+            if run.state != RunState::Unknown {
+                return Err(ServiceError::new(
+                    "run.recovery-not-required",
+                    "该 Run 当前不需要恢复检查",
+                ));
+            }
+            store.process_group_id(run_id)?
+        };
+        let process_group_status = inspect_process_group(process_group_id);
+        let (run, task_title) = {
+            let mut store = self.store.lock().map_err(|_| storage_write())?;
+            store.inspect_unknown_run(run_id)?;
+            let run = store.get_run(run_id)?;
+            let task = store.get_task(&run.task_id)?;
+            (run, task.title)
+        };
+        Ok(RecoveryInspection {
+            snapshot_status: self.snapshot_status(&run.request_id),
+            run,
+            task_title,
+            process_group_status,
+        })
+    }
+
+    pub fn resolve_unknown_run(
+        &self,
+        run_id: &str,
+        user_confirmed: bool,
+    ) -> Result<RecoveryResolution, ServiceError> {
+        let _gate = self.start_gate.lock().map_err(|_| storage_write())?;
+        validate_run_id(run_id)?;
+        if !user_confirmed {
+            return Err(ServiceError::new(
+                "run.recovery-confirmation-required",
+                "请先在系统进程管理工具中核验并确认相关进程已退出",
+            ));
+        }
+        let (run, process_group_id) = {
+            let store = self.store.lock().map_err(|_| storage_read())?;
+            let run = store.get_run(run_id)?;
+            (run, store.process_group_id(run_id)?)
+        };
+        if run.state != RunState::Unknown || run.recovery_status != RecoveryStatus::Required {
+            return Err(ServiceError::new(
+                "run.recovery-not-required",
+                "该 Run 当前不满足归档条件",
+            ));
+        }
+        if inspect_process_group(process_group_id) != ProcessGroupStatus::ExitedCandidate {
+            return Err(ServiceError::new(
+                "run.recovery-process-present",
+                "后端未能确认原进程组已退出；Run 和快照仍保留",
+            ));
+        }
+        let _snapshot = self.snapshot_path(&run.request_id)?;
+        self.store
+            .lock()
+            .map_err(|_| storage_write())?
+            .resolve_unknown_run(run_id)?;
+        let cleanup_failed =
+            snapshot::remove_snapshot(&self.data_dir.join("run-snapshots"), &run.request_id)
+                .is_err();
+        if cleanup_failed {
+            self.store
+                .lock()
+                .map_err(|_| storage_write())?
+                .record_cleanup_failure(run_id)?;
+        }
+        Ok(RecoveryResolution {
+            run: self.get_run(run_id)?,
+            snapshot_status: self.snapshot_status(&run.request_id),
+        })
+    }
+
+    fn snapshot_status(&self, request_id: &str) -> SnapshotStatus {
+        match self.snapshot_path(request_id) {
+            Ok(path) => match std::fs::symlink_metadata(path) {
+                Ok(metadata)
+                    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() =>
+                {
+                    SnapshotStatus::Exists
+                }
+                Ok(_) => SnapshotStatus::CannotVerify,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    SnapshotStatus::Missing
+                }
+                Err(_) => SnapshotStatus::CannotVerify,
+            },
+            Err(_) => SnapshotStatus::CannotVerify,
+        }
+    }
+
+    fn snapshot_path(&self, request_id: &str) -> Result<PathBuf, ServiceError> {
+        if !valid_request_id(request_id) {
+            return Err(ServiceError::new(
+                "run.recovery-path-invalid",
+                "该 Run 的快照标识无法安全核验",
+            ));
+        }
+        let root = self.data_dir.join("run-snapshots");
+        match std::fs::symlink_metadata(&root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(root.join(request_id))
+            }
+            Err(_) => {
+                return Err(ServiceError::new(
+                    "run.recovery-path-invalid",
+                    "快照目录无法安全核验",
+                ))
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() => {
+                return Err(ServiceError::new(
+                    "run.recovery-path-invalid",
+                    "快照目录无法安全核验",
+                ));
+            }
+            Ok(_) => {}
+        }
+        let canonical_root = std::fs::canonicalize(&root)
+            .map_err(|_| ServiceError::new("run.recovery-path-invalid", "快照目录无法安全核验"))?;
+        if canonical_root != root {
+            return Err(ServiceError::new(
+                "run.recovery-path-invalid",
+                "快照目录无法安全核验",
+            ));
+        }
+        let path = canonical_root.join(request_id);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(ServiceError::new(
+                "run.recovery-path-invalid",
+                "快照对象无法安全核验",
+            )),
+            Ok(_) => {
+                let canonical = std::fs::canonicalize(&path).map_err(|_| {
+                    ServiceError::new("run.recovery-path-invalid", "快照对象无法安全核验")
+                })?;
+                if canonical.parent() != Some(canonical_root.as_path()) {
+                    return Err(ServiceError::new(
+                        "run.recovery-path-invalid",
+                        "快照对象超出受信任目录",
+                    ));
+                }
+                Ok(canonical)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+            Err(_) => Err(ServiceError::new(
+                "run.recovery-path-invalid",
+                "快照对象无法安全核验",
+            )),
+        }
     }
     pub fn get_task(&self, id: &str) -> Result<TaskRecord, ServiceError> {
         self.store.lock().map_err(|_| storage_read())?.get_task(id)
@@ -603,7 +803,7 @@ impl Worker {
         }
         let starting = match self.runtime.store.lock() {
             Ok(mut store) => {
-                match store.set_state(&self.run_id, RunState::Starting, "starting", None) {
+                match store.set_state(&self.run_id, RunState::Starting, "starting", None, None) {
                     Ok(run) => run,
                     Err(_) => return failure("storage.write-failed"),
                 }
@@ -645,7 +845,13 @@ impl Worker {
     fn monitor_process(&self, child: &mut Child, pid: u32) -> ProcessCompletion {
         let running = match self.runtime.store.lock() {
             Ok(mut store) => {
-                match store.set_state(&self.run_id, RunState::Running, "running", Some(pid)) {
+                match store.set_state(
+                    &self.run_id,
+                    RunState::Running,
+                    "running",
+                    Some(pid),
+                    process_group_id_for(pid),
+                ) {
                     Ok(run) => run,
                     Err(_) => {
                         return if terminate_process_tree(child, pid) {
@@ -1018,12 +1224,69 @@ fn valid_request_id(value: &str) -> bool {
             .all(|(i, c)| [8, 13, 18, 23].contains(&i) || c.is_ascii_hexdigit())
 }
 
-fn not_ready(message: &str) -> ExecutionReadiness {
+fn not_ready(reason_code: &str, message: &str) -> ExecutionReadiness {
     ExecutionReadiness {
         ready: false,
         version: None,
         auth_state: AuthenticationState::Unknown,
         message: message.into(),
+        reason_code: Some(reason_code.into()),
+    }
+}
+
+fn validate_run_id(value: &str) -> Result<(), ServiceError> {
+    let valid = value.strip_prefix("run_").is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ServiceError::new("run.invalid-id", "Run 编号无效"))
+    }
+}
+
+#[cfg(unix)]
+fn process_group_id_for(pid: u32) -> Option<u32> {
+    Some(pid)
+}
+
+#[cfg(not(unix))]
+fn process_group_id_for(_pid: u32) -> Option<u32> {
+    None
+}
+
+fn inspect_process_group(process_group_id: Option<i64>) -> ProcessGroupStatus {
+    let Some(group_id) = process_group_id.and_then(|value| i32::try_from(value).ok()) else {
+        return ProcessGroupStatus::ManualRequired;
+    };
+    if group_id <= 0 {
+        return ProcessGroupStatus::ManualRequired;
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(-group_id, 0) };
+        let errno = (result == -1)
+            .then(|| std::io::Error::last_os_error().raw_os_error())
+            .flatten();
+        classify_process_group_probe(result, errno)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = group_id;
+        ProcessGroupStatus::CannotVerify
+    }
+}
+
+#[cfg(unix)]
+fn classify_process_group_probe(result: i32, errno: Option<i32>) -> ProcessGroupStatus {
+    if result == 0 {
+        ProcessGroupStatus::StillRunning
+    } else {
+        match errno {
+            Some(libc::ESRCH) => ProcessGroupStatus::ExitedCandidate,
+            Some(libc::EPERM) | None => ProcessGroupStatus::CannotVerify,
+            Some(_) => ProcessGroupStatus::CannotVerify,
+        }
     }
 }
 fn storage_read() -> ServiceError {
@@ -1155,16 +1418,63 @@ esac
 
     #[cfg(unix)]
     fn pending_running_run(runtime: &ExecutionRuntime, request_id: &str, pid: u32) -> RunRecord {
+        pending_running_run_with_group(runtime, request_id, pid, Some(pid))
+    }
+
+    #[cfg(unix)]
+    fn pending_running_run_with_group(
+        runtime: &ExecutionRuntime,
+        request_id: &str,
+        pid: u32,
+        process_group_id: Option<u32>,
+    ) -> RunRecord {
         let mut store = runtime.store.lock().unwrap();
         let (_, run) = store
             .create_pending(&request(request_id), "/tmp/synthetic-workspace")
             .unwrap();
         store
-            .set_state(&run.id, RunState::Starting, "starting", None)
+            .set_state(&run.id, RunState::Starting, "starting", None, None)
             .unwrap();
         store
-            .set_state(&run.id, RunState::Running, "running", Some(pid))
+            .set_state(
+                &run.id,
+                RunState::Running,
+                "running",
+                Some(pid),
+                process_group_id,
+            )
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn unknown_run_with_group(
+        runtime: &ExecutionRuntime,
+        request_id: &str,
+        pid: u32,
+        process_group_id: Option<u32>,
+    ) -> (RunRecord, PathBuf) {
+        let run = pending_running_run_with_group(runtime, request_id, pid, process_group_id);
+        let snapshot = runtime.data_dir.join("run-snapshots").join(&run.request_id);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("README.md"), "synthetic").unwrap();
+        worker_for(runtime, &run.id, snapshot.clone()).finalize(
+            ProcessCompletion::ExitUnconfirmed {
+                error_code: "run.stop-unconfirmed",
+                pid: Some(pid),
+            },
+        );
+        (runtime.get_run(&run.id).unwrap(), snapshot)
+    }
+
+    #[cfg(unix)]
+    fn exited_test_process_group() -> u32 {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("exit 0").process_group(0);
+        let mut child = command.spawn().unwrap();
+        let group_id = child.id();
+        assert!(child.wait().unwrap().success());
+        group_id
     }
 
     #[cfg(unix)]
@@ -1193,6 +1503,10 @@ esac
 
         let readiness = runtime.readiness();
         assert!(!readiness.ready);
+        assert_eq!(
+            readiness.reason_code.as_deref(),
+            Some("execution.managed-policy-unverified")
+        );
         assert_eq!(readiness.auth_state, AuthenticationState::Unknown);
         assert!(readiness.message.contains("托管 Hook"));
         let error = runtime
@@ -1207,6 +1521,206 @@ esac
             .unwrap_err();
         assert_eq!(error.code, "execution.managed-policy-unverified");
         assert!(runtime.list_tasks().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_probe_classifies_only_esrch_as_exit_candidate() {
+        assert_eq!(
+            classify_process_group_probe(0, None),
+            ProcessGroupStatus::StillRunning
+        );
+        assert_eq!(
+            classify_process_group_probe(-1, Some(libc::ESRCH)),
+            ProcessGroupStatus::ExitedCandidate
+        );
+        assert_eq!(
+            classify_process_group_probe(-1, Some(libc::EPERM)),
+            ProcessGroupStatus::CannotVerify
+        );
+        assert_eq!(
+            classify_process_group_probe(-1, Some(libc::EIO)),
+            ProcessGroupStatus::CannotVerify
+        );
+        assert_eq!(
+            inspect_process_group(None),
+            ProcessGroupStatus::ManualRequired
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_run_with_live_process_group_keeps_snapshot_and_blocks_archive() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let group_id = unsafe { libc::getpgrp() as u32 };
+        let (run, snapshot) = unknown_run_with_group(
+            &runtime,
+            "00000000-0000-4000-8000-000000000191",
+            42_491,
+            Some(group_id),
+        );
+
+        let inspected = runtime.inspect_unknown_run(&run.id).unwrap();
+        assert_eq!(
+            inspected.process_group_status,
+            ProcessGroupStatus::StillRunning
+        );
+        assert_eq!(
+            runtime.resolve_unknown_run(&run.id, true).unwrap_err().code,
+            "run.recovery-process-present"
+        );
+        assert_eq!(runtime.get_run(&run.id).unwrap().state, RunState::Unknown);
+        assert!(snapshot.join("README.md").exists());
+        assert_eq!(
+            runtime.readiness().reason_code.as_deref(),
+            Some("execution.process-state-unknown")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_candidate_requires_user_confirmation_and_archives_as_failure() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let (run, snapshot) = unknown_run_with_group(
+            &runtime,
+            "00000000-0000-4000-8000-000000000192",
+            42_492,
+            Some(exited_test_process_group()),
+        );
+
+        let inspected = runtime.inspect_unknown_run(&run.id).unwrap();
+        assert_eq!(
+            inspected.process_group_status,
+            ProcessGroupStatus::ExitedCandidate
+        );
+        assert!(inspected.run.recovery_checked_at.is_some());
+        assert_eq!(
+            runtime
+                .resolve_unknown_run(&run.id, false)
+                .unwrap_err()
+                .code,
+            "run.recovery-confirmation-required"
+        );
+        assert_eq!(runtime.get_run(&run.id).unwrap().state, RunState::Unknown);
+        assert!(snapshot.join("README.md").exists());
+
+        let archived = runtime.resolve_unknown_run(&run.id, true).unwrap();
+        assert_eq!(archived.run.state, RunState::Crashed);
+        assert_eq!(
+            archived.run.outcome.as_deref(),
+            Some("recovered-after-exit")
+        );
+        assert_eq!(
+            archived.run.error_code.as_deref(),
+            Some("run.stop-unconfirmed")
+        );
+        assert_eq!(archived.run.recovery_status, RecoveryStatus::Resolved);
+        assert_eq!(archived.snapshot_status, SnapshotStatus::Missing);
+        assert_eq!(
+            runtime.get_task(&archived.run.task_id).unwrap().state,
+            "failed"
+        );
+        assert!(!snapshot.exists());
+        let production_runtime =
+            ExecutionRuntime::open(runtime.config_dir.clone(), runtime.data_dir.clone()).unwrap();
+        assert_eq!(
+            production_runtime.readiness().reason_code.as_deref(),
+            Some("execution.managed-policy-unverified")
+        );
+        let events = runtime.list_run_events(&run.id, 0, 20).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "recovery-confirmed-exited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_process_group_requires_manual_handling() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let (run, snapshot) = unknown_run_with_group(
+            &runtime,
+            "00000000-0000-4000-8000-000000000193",
+            42_493,
+            None,
+        );
+
+        let inspected = runtime.inspect_unknown_run(&run.id).unwrap();
+        assert_eq!(
+            inspected.process_group_status,
+            ProcessGroupStatus::ManualRequired
+        );
+        assert_eq!(
+            inspected.run.recovery_status,
+            RecoveryStatus::ManualRequired
+        );
+        assert_eq!(
+            runtime.resolve_unknown_run(&run.id, true).unwrap_err().code,
+            "run.recovery-not-required"
+        );
+        assert_eq!(runtime.get_run(&run.id).unwrap().state, RunState::Unknown);
+        assert!(snapshot.join("README.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failure_keeps_resolved_failure_and_records_fixed_event() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let (run, snapshot) = unknown_run_with_group(
+            &runtime,
+            "00000000-0000-4000-8000-000000000194",
+            42_494,
+            Some(exited_test_process_group()),
+        );
+        std::fs::remove_dir_all(&snapshot).unwrap();
+        std::fs::write(&snapshot, "non-directory cleanup obstacle").unwrap();
+
+        let archived = runtime.resolve_unknown_run(&run.id, true).unwrap();
+        assert_eq!(archived.run.state, RunState::Crashed);
+        assert_eq!(
+            archived.run.outcome.as_deref(),
+            Some("recovered-after-exit")
+        );
+        assert_eq!(archived.snapshot_status, SnapshotStatus::CannotVerify);
+        let events = runtime.list_run_events(&run.id, 0, 20).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "recovery-snapshot-cleanup-failed"));
+        assert_eq!(
+            std::fs::read_to_string(snapshot).unwrap(),
+            "non-directory cleanup obstacle"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_audit_write_failure_rolls_back_archive_and_keeps_snapshot() {
+        let root = tempdir().unwrap();
+        let runtime = fake_runtime(root.path());
+        let (run, snapshot) = unknown_run_with_group(
+            &runtime,
+            "00000000-0000-4000-8000-000000000195",
+            42_495,
+            Some(exited_test_process_group()),
+        );
+        rusqlite::Connection::open(runtime.data_dir.join("runs.sqlite3"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_recovery_audit BEFORE INSERT ON run_events
+                 WHEN NEW.kind='recovery-confirmed-exited'
+                 BEGIN SELECT RAISE(FAIL, 'synthetic audit failure'); END;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.resolve_unknown_run(&run.id, true).unwrap_err().code,
+            "storage.write-failed"
+        );
+        assert_eq!(runtime.get_run(&run.id).unwrap().state, RunState::Unknown);
+        assert!(snapshot.join("README.md").exists());
     }
 
     #[cfg(unix)]

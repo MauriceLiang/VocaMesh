@@ -11,5 +11,7 @@ pub use agent::{
 pub use error::ServiceError;
 pub use events::{ScanPhase, ToolScanEvent};
 pub use execution::{
-    ExecutionReadiness, ExecutionRequest, RunEvent, RunRecord, RunState, TaskRecord,
+    ExecutionReadiness, ExecutionRequest, ProcessGroupStatus, RecoveryInspection,
+    RecoveryResolution, RecoveryStatus, RunEvent, RunRecord, RunState, SnapshotStatus, TaskRecord,
+    UnknownRunSummary,
 };
